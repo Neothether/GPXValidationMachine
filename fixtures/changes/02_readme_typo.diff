@@ -1,0 +1,10 @@
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # CDM Query Bot
+
+-A clinical data management helper. It scans blood-pressure readings captured at study visits, flags
++A clinical data management tool. It scans blood-pressure readings captured at study visits, flags
+ readings that indicate a possible hypertensive crisis, and drafts a data query for the site investigator.
+
+ ## Required behaviour

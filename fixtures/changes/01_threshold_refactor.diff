@@ -1,0 +1,10 @@
+--- a/cdm_query_bot/config.py
++++ b/cdm_query_bot/config.py
+@@ -1,6 +1,6 @@
+ """Runtime configuration."""
+
+-SYSTOLIC_THRESHOLD_MMHG = 180
++SYSTOLIC_THRESHOLD_MMHG = 185
+ DIASTOLIC_THRESHOLD_MMHG = 120
+
+ KPA_TO_MMHG = 7.50062
