@@ -35,7 +35,7 @@ def generate(agent: str, system: str, prompt: str, schema: type[BaseModel], tier
     model = model_for(tier)
     config = types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
                                          response_schema=schema, temperature=0.1)
-    attempts = max(4, 2 * len(_clients or [1]))
+    attempts = max(7, 2 * len(_clients or [1]))
     for attempt in range(attempts):
         client = _next_client()
         try:
@@ -47,7 +47,7 @@ def generate(agent: str, system: str, prompt: str, schema: type[BaseModel], tier
         except errors.APIError as e:
             if e.code not in (429, 500, 503) or attempt == attempts - 1:
                 raise
-            time.sleep(min(2 ** attempt, 20))
+            time.sleep(min(3 * 2 ** attempt, 40))
 
 
 def embed(texts: list[str]) -> list[list[float]]:
