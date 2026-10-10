@@ -65,6 +65,18 @@ def users():
         return conn.execute("select id, display_name, role, is_human from users order by is_human desc, id").fetchall()
 
 
+@app.get("/api/demo")
+def demo_fixtures():
+    """Synthetic SOP, intended-use statements and change stream for the bundled demo target."""
+    root = Path(__file__).resolve().parents[2]
+    fx = root / "fixtures"
+    return {"name": "CDM Query Bot", "repo_path": str(root / "targets" / "cdm-query-bot"),
+            "sop": (fx / "sop.md").read_text(encoding="utf-8"),
+            "intended_use": {p.stem.replace("intended_use_", ""): p.read_text(encoding="utf-8")
+                             for p in sorted(fx.glob("intended_use_*.md"))},
+            "changes": {p.stem: p.read_text(encoding="utf-8") for p in sorted((fx / "changes").glob("*.diff"))}}
+
+
 # --------------------------------------------------------------------------- systems (inventory)
 class NewSystem(BaseModel):
     name: str
