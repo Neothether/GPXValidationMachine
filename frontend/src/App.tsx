@@ -148,14 +148,22 @@ function Modal({ title, close, children }: { title: string; close: () => void; c
   useEffect(() => { const previous = document.activeElement as HTMLElement | null; dialog.current?.showModal(); return () => { previous?.focus(); }; }, []);
   return <dialog ref={dialog} className="modal" aria-labelledby="dialog-title" onCancel={(e) => { e.preventDefault(); close(); }}><div className="modal-heading"><h2 id="dialog-title">{title}</h2><button className="icon-button" onClick={close} aria-label="Close dialog"><Icon name="close"/></button></div>{children}</dialog>;
 }
+// Demo only: the four seeded accounts are offered in a menu. The API still does not list accounts to
+// anonymous callers, so replace this with a typed account name outside the demo.
+const DEMO_ACCOUNTS = [
+  ["alex.author", "Author (CSV specialist)"],
+  ["quinn.qa", "Quality Assurance"],
+  ["sam.owner", "System Owner"],
+  ["terry.tester", "Tester"],
+];
 function SignInForm({ onSignedIn, label = "Sign in" }: { onSignedIn: (user: any) => void; label?: string }) {
-  const [account, setAccount] = useState("");
+  const [account, setAccount] = useState(DEMO_ACCOUNTS[0][0]);
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
   // The typed password is cleared before the request, so it never lingers after a failed attempt.
   return <form onSubmit={async (e) => { e.preventDefault(); if (working) return; setWorking(true); setError(""); const typed = password; setPassword(""); try { const r = await api("/login", { user_id: account.trim(), password: typed }); onSignedIn(r.user); } catch (e) { setError((e as Error).message); } finally { setWorking(false); } }}>
-    <label htmlFor="account">Account name</label><input id="account" autoComplete="username" autoCapitalize="none" spellCheck={false} value={account} onChange={(e) => setAccount(e.target.value)} required/>
+    <label htmlFor="account">Sign in as</label><select id="account" value={account} onChange={(e) => setAccount(e.target.value)}>{DEMO_ACCOUNTS.map(([id, role]) => <option key={id} value={id}>{role} · {id}</option>)}</select>
     <label htmlFor="password">Password</label><input id="password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required/>
     {error && <p className="form-error" role="alert">{error}</p>}
     <div className="modal-actions"><button className="primary" disabled={!account.trim() || !password || working}>{working ? "Signing in\u2026" : label}<Icon name="arrow" size={16}/></button></div>

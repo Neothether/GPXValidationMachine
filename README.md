@@ -62,8 +62,8 @@ python manage.py check
 python manage.py dev
 ```
 
-Open **http://127.0.0.1:5173**. Nothing is shown until you sign in: type the account name `alex.author`
-and the demo-account password. Other demo accounts are `quinn.qa`, `sam.owner`, and `terry.tester`.
+Open **http://127.0.0.1:5173**. Nothing is shown until you sign in: pick an account (for example `alex.author`)
+and enter the demo-account password. Other demo accounts are `quinn.qa`, `sam.owner`, and `terry.tester`.
 API docs: http://127.0.0.1:8000/docs. Press Ctrl+C to stop both servers. After editing `.env`, stop and
 restart `dev` to load the changes; on Windows also restart it after editing backend code.
 
