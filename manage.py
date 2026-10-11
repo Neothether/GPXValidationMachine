@@ -71,7 +71,10 @@ def dev():
                 raise RuntimeError(f"Port {port} is already in use. Stop the existing server before starting another copy.") from None
     children = []
     try:
-        children.append(subprocess.Popen([str(PYTHON), "-m", "uvicorn", "app.main:app", "--reload",
+        # On Windows uvicorn's reloader restarts by sending Ctrl+C to the whole console, which also stops
+        # the frontend and this script. There, restart `dev` by hand after editing backend code.
+        reload = [] if os.name == "nt" else ["--reload"]
+        children.append(subprocess.Popen([str(PYTHON), "-m", "uvicorn", "app.main:app", *reload,
                                          "--host", "127.0.0.1", "--port", "8000"], cwd=ROOT / "backend", start_new_session=os.name != "nt"))
         children.append(subprocess.Popen([npm(), "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"], cwd=ROOT / "frontend", start_new_session=os.name != "nt"))
         print("Open http://127.0.0.1:5173 . Press Ctrl+C to stop both servers.", flush=True)

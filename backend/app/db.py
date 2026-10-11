@@ -21,7 +21,9 @@ def pool() -> ConnectionPool:
     global _pool
     if _pool is None:
         _pool = ConnectionPool(config.required("DATABASE_URL"), min_size=1, max_size=8, timeout=10,
-                               kwargs={"row_factory": dict_row, "connect_timeout": 10}, open=True)
+                               kwargs={"row_factory": dict_row, "connect_timeout": 10}, open=True,
+                               # the database closes idle connections; test each one before handing it out
+                               check=ConnectionPool.check_connection, max_idle=120)
     return _pool
 
 

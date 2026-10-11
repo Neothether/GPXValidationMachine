@@ -25,7 +25,8 @@ def test_relative_evidence_path_is_independent_of_cwd(tmp_path, monkeypatch):
 def test_missing_database_config_is_actionable(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "CHANGE_ME")
     monkeypatch.setattr(db, "_pool", None)
-    response = TestClient(app).get("/api/users")
+    # sign-in is the first database call an anonymous user can reach now that reads need a session
+    response = TestClient(app).post("/api/login", json={"user_id": "alex.author", "password": "test"})
     assert response.status_code == 503
     assert "Set DATABASE_URL" in response.json()["detail"]
 

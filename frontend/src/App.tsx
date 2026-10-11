@@ -1,7 +1,7 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, ApiError, fmt, setToken } from "./api";
+import { api, ApiError, fmt, setSignedOutHandler } from "./api";
 
 type Act = (label: string, fn: () => Promise<unknown>, done?: string) => Promise<void>;
 type Banner = { kind: "ok" | "bad"; title: string; text: string } | null;
@@ -74,6 +74,7 @@ function Table({ cols, rows, empty = "Nothing recorded yet." }: { cols: string[]
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [sid, setSid] = useState<string | null>(null);
   const [tab, setTab] = useState<(typeof TABS)[number]>("Pipeline");
   const [banner, setBanner] = useState<Banner>(null);
@@ -82,7 +83,12 @@ export default function App() {
   const [authOpen, setAuthOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const actionRunning = useRef(false);
-  const system = useLoad(sid ? `/systems/${sid}` : null, rev);
+  const system = useLoad(sid && user ? `/systems/${sid}` : null, rev);
+  // Nothing is shown without a session: restore one from the cookie, and leave as soon as the API ends it.
+  useEffect(() => {
+    setSignedOutHandler(() => { setUser(null); setSid(null); setAuthOpen(false); setBanner(null); });
+    api("/me").then(setUser).catch(() => setUser(null)).finally(() => setSessionChecked(true));
+  }, []);
   const act: Act = async (label, fn, done) => {
     if (actionRunning.current) return;
     actionRunning.current = true; setBusy(label); setBanner(null);
@@ -92,6 +98,12 @@ export default function App() {
   };
   const openSystem = (id: string) => { setSid(id); setTab("Pipeline"); setBanner(null); setMenuOpen(false); };
   const inventory = () => { setSid(null); setBanner(null); setMenuOpen(false); };
+  if (!sessionChecked) return <div className="signin-page"><span className="spinner"/></div>;
+  if (!user) return <div className="signin-page"><div className="signin-card">
+    <div className="signin-brand"><span className="brand-mark"><Icon name="shield" size={25}/></span><div><strong>Validation Machine</strong><span>Sign in to continue</span></div></div>
+    <p className="muted">Validation records are available to authorised accounts only.</p>
+    <SignInForm onSignedIn={(u) => { setUser(u); setRev((v) => v + 1); }}/>
+  </div></div>;
   return <Session.Provider value={{ signedIn: !!user, busy }}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <div className="app-shell">
@@ -110,7 +122,6 @@ export default function App() {
         <main id="main-content">
           {banner && <div className={`banner ${banner.kind}`} role={banner.kind === "bad" ? "alert" : "status"}><Icon name={banner.kind === "bad" ? "alert" : "check"}/><div><b>{banner.title}</b>{banner.text}</div><button className="icon-button" aria-label="Dismiss notification" onClick={() => setBanner(null)}><Icon name="close" size={16}/></button></div>}
           {busy && <div className="activity-banner" role="status"><span className="spinner"/><div><b>{busy}…</b><span>We’ll refresh the workspace when this finishes.</span></div></div>}
-          {!user && <div className="guest-banner"><span>You’re viewing the workspace. Sign in to draft, review, or register a system.</span><button className="link" onClick={() => setAuthOpen(true)}>Sign in <Icon name="arrow" size={15}/></button></div>}
           {!sid ? <Inventory rev={rev} act={act} open={openSystem} signedIn={!!user}/> : <>
             <div className="page-heading"><div><span className="eyebrow">SYSTEM WORKSPACE</span><h1>{tab === "Pipeline" ? "Validation pipeline" : tab}</h1><p>{TAB_DESCRIPTIONS[tab]}</p></div></div>
             <SystemHeader sid={sid} rev={rev} act={act}/>
@@ -128,7 +139,7 @@ export default function App() {
         </main>
       </div>
     </div>
-    {authOpen && <AuthDialog user={user} close={() => setAuthOpen(false)} signIn={(u) => { setUser(u); setAuthOpen(false); setRev((v) => v + 1); }} signOut={() => { setToken(""); setUser(null); setAuthOpen(false); setRev((v) => v + 1); }}/>}
+    {authOpen && <AuthDialog user={user} close={() => setAuthOpen(false)} signIn={(u) => { setUser(u); setSid(null); setAuthOpen(false); setRev((v) => v + 1); }} signOut={async () => { await api("/logout", {}).catch(() => undefined); setUser(null); setSid(null); setAuthOpen(false); }}/>}
   </Session.Provider>;
 }
 
@@ -137,22 +148,38 @@ function Modal({ title, close, children }: { title: string; close: () => void; c
   useEffect(() => { const previous = document.activeElement as HTMLElement | null; dialog.current?.showModal(); return () => { previous?.focus(); }; }, []);
   return <dialog ref={dialog} className="modal" aria-labelledby="dialog-title" onCancel={(e) => { e.preventDefault(); close(); }}><div className="modal-heading"><h2 id="dialog-title">{title}</h2><button className="icon-button" onClick={close} aria-label="Close dialog"><Icon name="close"/></button></div>{children}</dialog>;
 }
-function AuthDialog({ user, close, signIn, signOut }: { user: any; close: () => void; signIn: (user: any) => void; signOut: () => void }) {
-  const users = useLoad<any[]>("/users", 0);
-  const [pick, setPick] = useState("");
+function SignInForm({ onSignedIn, label = "Sign in" }: { onSignedIn: (user: any) => void; label?: string }) {
+  const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
-  const humans = users.data?.filter((u) => u.is_human) ?? [];
-  const selected = pick || humans[0]?.id || "";
-  return <Modal title={user ? "Your account" : "Welcome to your workspace"} close={close}>
-    <p className="muted">{user ? `Signed in as ${user.display_name}. You can switch accounts below.` : "Sign in with your workspace account to begin validation."}</p>
-    {pending(users) ? <LoadState resources={[users]}/> : <form onSubmit={async (e) => { e.preventDefault(); if (working) return; setWorking(true); setError(""); try { const r = await api("/login", { user_id: selected, password }); setToken(r.token); signIn(humans.find((u) => u.id === selected)); } catch (e) { setError((e as Error).message); setPassword(""); } finally { setWorking(false); } }}>
-      <label htmlFor="account">Workspace account</label><select id="account" value={selected} onChange={(e) => setPick(e.target.value)}>{humans.map((u) => <option key={u.id} value={u.id}>{u.display_name} · {u.role.replace(/_/g, " ")}</option>)}</select>
-      <label htmlFor="password">Password</label><input id="password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required/>
-      {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="modal-actions">{user && <button type="button" onClick={signOut} disabled={working}>Sign out</button>}<button className="primary" disabled={!selected || !password || working}>{working ? "Signing in…" : user ? "Switch account" : "Sign in"}<Icon name="arrow" size={16}/></button></div>
-    </form>}
+  // The typed password is cleared before the request, so it never lingers after a failed attempt.
+  return <form onSubmit={async (e) => { e.preventDefault(); if (working) return; setWorking(true); setError(""); const typed = password; setPassword(""); try { const r = await api("/login", { user_id: account.trim(), password: typed }); onSignedIn(r.user); } catch (e) { setError((e as Error).message); } finally { setWorking(false); } }}>
+    <label htmlFor="account">Account name</label><input id="account" autoComplete="username" autoCapitalize="none" spellCheck={false} value={account} onChange={(e) => setAccount(e.target.value)} required/>
+    <label htmlFor="password">Password</label><input id="password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required/>
+    {error && <p className="form-error" role="alert">{error}</p>}
+    <div className="modal-actions"><button className="primary" disabled={!account.trim() || !password || working}>{working ? "Signing in\u2026" : label}<Icon name="arrow" size={16}/></button></div>
+  </form>;
+}
+function PasswordForm() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [working, setWorking] = useState(false);
+  return <form onSubmit={async (e) => { e.preventDefault(); if (working) return; setWorking(true); setNote(null); const body = { current, new: next }; setCurrent(""); setNext(""); try { await api("/password", body); setNote({ ok: true, text: "Password changed. Your other sessions were signed out." }); } catch (e) { setNote({ ok: false, text: (e as Error).message }); } finally { setWorking(false); } }}>
+    <label htmlFor="current-password">Current password</label><input id="current-password" type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} required/>
+    <label htmlFor="new-password">New password <span className="muted">(at least 10 characters)</span></label><input id="new-password" type="password" autoComplete="new-password" minLength={10} value={next} onChange={(e) => setNext(e.target.value)} required/>
+    {note && <p className={note.ok ? "muted" : "form-error"} role={note.ok ? "status" : "alert"}>{note.text}</p>}
+    <div className="modal-actions"><button disabled={!current || next.length < 10 || working}>{working ? "Saving\u2026" : "Change password"}</button></div>
+  </form>;
+}
+function AuthDialog({ user, close, signIn, signOut }: { user: any; close: () => void; signIn: (user: any) => void; signOut: () => void }) {
+  const [view, setView] = useState<"account" | "switch" | "password">("account");
+  return <Modal title="Your account" close={close}>
+    <p className="muted">Signed in as {user.display_name} ({user.role.replace(/_/g, " ")}).</p>
+    {view === "account" && <div className="modal-actions"><button type="button" onClick={() => setView("password")}>Change password</button><button type="button" onClick={() => setView("switch")}>Switch account</button><button type="button" className="primary" onClick={signOut}>Sign out</button></div>}
+    {view === "switch" && <SignInForm onSignedIn={signIn} label="Switch account"/>}
+    {view === "password" && <PasswordForm/>}
   </Modal>;
 }
 

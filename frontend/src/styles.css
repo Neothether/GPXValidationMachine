@@ -1548,3 +1548,41 @@ tbody tr:hover {
     min-height:44px;
   }
 }
+
+/* Sign-in screen: the only thing shown without a session. */
+.signin-page {
+  min-height:100vh;
+  display:grid;
+  place-items:center;
+  padding:24px;
+  background:var(--bg);
+}
+.signin-card {
+  width:100%;
+  max-width:400px;
+  padding:32px;
+  border:1px solid var(--line);
+  border-radius:12px;
+  background:var(--panel);
+  box-shadow:0 8px 28px #17263c14;
+}
+.signin-card input {
+  width:100%;
+}
+.signin-brand {
+  display:flex;
+  align-items:center;
+  gap:13px;
+  margin-bottom:18px;
+  color:#fff;
+}
+.signin-brand strong {
+  display:block;
+  font-size:19px;
+  letter-spacing:-.3px;
+  color:var(--ink);
+}
+.signin-brand span:not(.brand-mark) {
+  font-size:12px;
+  color:var(--muted);
+}

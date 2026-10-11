@@ -1,20 +1,19 @@
 """HTTP API. Humans act through vm_app; agents through vm_agent; the runner through vm_runner."""
-import secrets
 from pathlib import Path
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from . import agents, config, db, llm, package, review, runner
+from . import agents, auth, config, db, llm, package, review, runner
+from .auth import current_user
 from psycopg_pool import PoolTimeout
 
-app = FastAPI(title="The Validation Machine")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
-
-SESSIONS: dict[str, dict] = {}
+# The session check is a dependency of the application itself, so a route cannot be added without it.
+# The UI reaches the API through its own origin (dev proxy), so no cross-origin access is allowed.
+app = FastAPI(title="The Validation Machine", dependencies=[Depends(auth.require_session)])
+app.include_router(auth.router)
 
 
 @app.exception_handler(psycopg.errors.RaiseException)
@@ -54,36 +53,10 @@ async def database_not_initialized(_, exc):
         "Database schema is missing. For a new database, run python manage.py init-db. For a shared database, ask its owner to check setup."})
 
 
-def _check_password(conn, user_id: str, password: str) -> dict | None:
-    return conn.execute(
-        "select id, display_name, role from users where id = %s and is_human "
-        "and password_hash = crypt(%s, password_hash)", (user_id, password)).fetchone()
+_check_password = auth.check_password
 
 
-def current_user(x_token: str = Header(default="")) -> dict:
-    user = SESSIONS.get(x_token)
-    if not user:
-        raise HTTPException(401, "Sign in first")
-    return user
-
-
-# --------------------------------------------------------------------------- identity
-class Login(BaseModel):
-    user_id: str
-    password: str
-
-
-@app.post("/api/login")
-def login(body: Login):
-    with db.read() as conn:
-        user = _check_password(conn, body.user_id, body.password)
-    if not user:
-        raise HTTPException(401, "Unknown user or wrong password")
-    token = secrets.token_urlsafe(24)
-    SESSIONS[token] = user
-    return {"token": token, "user": user}
-
-
+# --------------------------------------------------------------------------- identity (sign-in lives in auth.py)
 @app.get("/api/users")
 def users():
     with db.read() as conn:
@@ -202,7 +175,7 @@ def sign(aid: str, body: Sign, user=Depends(current_user)):
     """E-signature: the signer re-enters their password; the signature binds to the exact content hash."""
     with db.tx(user["id"], db.APP) as conn:
         if not _check_password(conn, user["id"], body.password):
-            raise HTTPException(401, "Password re-entry failed: signature not applied")
+            raise HTTPException(403, "Password re-entry failed: signature not applied")   # 401 would mean "signed out"
         a = conn.execute("select content_hash from artifacts where id = %s", (aid,)).fetchone()
         if not a:
             raise HTTPException(404)
@@ -379,5 +352,7 @@ def regress(cid: str, user=Depends(current_user)):
 
 # --------------------------------------------------------------------------- validation package
 @app.get("/api/systems/{sid}/package", response_class=HTMLResponse)
-def validation_package(sid: str):
+def validation_package(sid: str, user=Depends(current_user)):
+    with db.tx(user["id"], db.APP) as conn:
+        db.audit(conn, "package_exported", "system", sid)
     return package.render(sid)

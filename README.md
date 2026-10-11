@@ -62,9 +62,23 @@ python manage.py check
 python manage.py dev
 ```
 
-Open **http://127.0.0.1:5173**. Select `alex.author` and enter the demo-account password to sign in.
-Other demo accounts are `quinn.qa`, `sam.owner`, and `terry.tester`. API docs: http://127.0.0.1:8000/docs.
-Press Ctrl+C to stop both servers. After editing `.env`, stop and restart `dev` to load the changes.
+Open **http://127.0.0.1:5173**. Nothing is shown until you sign in: type the account name `alex.author`
+and the demo-account password. Other demo accounts are `quinn.qa`, `sam.owner`, and `terry.tester`.
+API docs: http://127.0.0.1:8000/docs. Press Ctrl+C to stop both servers. After editing `.env`, stop and
+restart `dev` to load the changes; on Windows also restart it after editing backend code.
+
+### Access control
+
+- Every API route except sign-in and a health check requires a session (`backend/tests/test_access.py`
+  checks each route). Sessions are stored hashed in the database, expire after `SESSION_HOURS` (default 8),
+  end on sign-out, and travel in an HttpOnly cookie that page scripts cannot read.
+- Sign-ins, failed sign-ins, sign-outs, password changes and package exports are written to the audit trail.
+  Five failed attempts on one account within 15 minutes block further attempts for that window.
+- The demo accounts start with one shared password. Each person should change theirs from the account
+  menu (top right) so signatures are attributable to one individual.
+- All signed-in accounts can read every system; there is no per-system access yet.
+- Target folders are sent to Gemini for drafting. Never place real patient data in a target folder.
+- An existing database needs `backend/sql/004_sessions.sql` applied once (`python manage.py init-db` does it).
 
 The check connects to the database and checks accounts without displaying secrets. It checks that a
 Gemini key is configured, but does not call Gemini. The app reports missing configuration or database
