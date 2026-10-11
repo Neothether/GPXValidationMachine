@@ -16,8 +16,9 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
     method: body === undefined ? "GET" : "POST",
     headers: { "Content-Type": "application/json", "X-Token": token },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  }).catch(() => { throw new ApiError("Unable to reach the validation service. Check your connection and try again.", false); });
   if (!res.ok) {
+    if ([502, 503, 504].includes(res.status)) throw new ApiError("The validation service is unavailable. Check that the backend is running, then try again.", false);
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new ApiError(typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail), err.enforced_by === "database");
   }

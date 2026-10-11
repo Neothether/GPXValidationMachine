@@ -1,253 +1,256 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, fmt, setToken } from "./api";
 
 type Act = (label: string, fn: () => Promise<unknown>, done?: string) => Promise<void>;
 type Banner = { kind: "ok" | "bad"; title: string; text: string } | null;
 type P = { sid: string; rev: number; act: Act };
-
+const Session = createContext({ signedIn: false, busy: "" });
 const TABS = ["Pipeline", "Traceability", "Execution", "Deviations", "Review", "Change control", "Audit trail"] as const;
-
-function useLoad<T = any>(path: string | null, rev: number): T | undefined {
-  const [data, setData] = useState<T>();
-  useEffect(() => {
-    let live = true;
-    if (path) api<T>(path).then((d) => live && setData(d)).catch(() => live && setData(undefined));
-    return () => {
-      live = false;
-    };
-  }, [path, rev]);
-  return data;
+const TAB_ICONS = ["layers", "link", "play", "alert", "check", "change", "clock"];
+const TAB_DESCRIPTIONS: Record<string, string> = {
+  Pipeline: "Move from intended use to a complete validation package.",
+  Traceability: "Connect requirements, risks, tests, and supporting evidence.",
+  Execution: "Inspect protocol results and verify recorded evidence.",
+  Deviations: "Investigate failures, review fixes, and track resolution.",
+  Review: "Review your validation package and its supporting controls.",
+  "Change control": "Understand change impact and target your regression testing.",
+  "Audit trail": "Explore recorded activity across the workspace.",
+};
+function Icon({ name, size = 20 }: { name: string; size?: number }) {
+  const paths: Record<string, ReactNode> = {
+    grid: <><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
+    layers: <><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></>,
+    link: <><path d="m10 14 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" transform="translate(0 -1)"/></>,
+    play: <path d="m8 4 12 8-12 8V4Z"/>,
+    alert: <><path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5m0 3v.1"/></>,
+    check: <><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></>,
+    change: <><path d="M4 7h15l-4-4m5 14H5l4 4M4 7v5m16 5v-5"/></>,
+    clock: <><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></>,
+    arrow: <path d="M4 12h16m-6-6 6 6-6 6"/>,
+    plus: <path d="M12 5v14M5 12h14"/>,
+    search: <><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></>,
+    doc: <><path d="M14 3H5v18h14V8l-5-5Zm0 0v5h5M8 12h8M8 16h6"/></>,
+    shield: <><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></>,
+    close: <path d="m6 6 12 12M18 6 6 18"/>,
+    menu: <path d="M4 6h16M4 12h16M4 18h16"/>,
+  };
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] ?? paths.doc}</svg>;
 }
 
+type Resource<T> = { data?: T; loading: boolean; error: string; retry: () => void };
+function useLoad<T = any>(path: string | null, rev: number): Resource<T> {
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<{ key: string; data?: T; error: string }>({ key: "", error: "" });
+  const key = `${path}:${rev}:${attempt}`;
+  useEffect(() => {
+    let live = true;
+    if (path) api<T>(path).then((data) => { if (live) setState({ key, data, error: "" }); })
+      .catch((e) => { if (live) setState({ key, error: e.message || "The request failed." }); });
+    return () => { live = false; };
+  }, [path, key]);
+  return { data: state.key === key ? state.data : undefined, loading: !!path && state.key !== key, error: state.key === key ? state.error : "", retry: () => setAttempt((v) => v + 1) };
+}
+function LoadState({ resources }: { resources: Resource<any>[] }) {
+  const failed = resources.filter((r) => r.error);
+  return <div className="panel load-state" role={failed.length ? "alert" : "status"}>
+    {failed.length ? <><Icon name="alert" size={28}/><h3>We couldn’t load this information</h3><p>{failed.map((r) => r.error).join(" · ")}</p><button onClick={() => failed.forEach((r) => r.retry())}>Try again</button></>
+      : <><span className="spinner"/><p>Loading workspace information…</p></>}
+  </div>;
+}
+const pending = (...resources: Resource<any>[]) => resources.some((r) => r.loading || r.error);
 const tone = (v?: string | null) =>
   !v ? "" : ["approved", "pass", "validated", "met", "resolved", "low"].includes(v) ? "ok"
     : ["fail", "error", "open", "gap", "critical", "high", "major"].includes(v) ? "bad"
     : ["draft", "partial", "medium", "minor", "change_pending", "in_validation"].includes(v) ? "warn" : "";
-
-const Chip = ({ v }: { v?: string | null }) => (v ? <span className={`chip ${tone(v)}`}>{v.replace(/_/g, " ")}</span> : null);
-
-function Table({ cols, rows, empty = "Nothing yet." }: { cols: string[]; rows: ReactNode[][]; empty?: string }) {
-  if (!rows.length) return <p className="muted">{empty}</p>;
-  return (
-    <div className="tablewrap">
-      <table>
-        <thead><tr>{cols.map((c) => <th key={c}>{c}</th>)}</tr></thead>
-        <tbody>{rows.map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j}>{c}</td>)}</tr>)}</tbody>
-      </table>
-    </div>
-  );
+const Chip = ({ v }: { v?: string | null }) => (v ? <span className={`chip ${tone(v)}`}><span className="status-dot"/>{v.replace(/_/g, " ")}</span> : null);
+function Table({ cols, rows, empty = "Nothing recorded yet." }: { cols: string[]; rows: ReactNode[][]; empty?: string }) {
+  if (!rows.length) return <div className="empty-state"><Icon name="doc" size={28}/><p>{empty}</p></div>;
+  return <div className="tablewrap"><table><thead><tr>{cols.map((c, i) => <th key={i} scope="col">{c}</th>)}</tr></thead><tbody>{rows.map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j}>{c}</td>)}</tr>)}</tbody></table></div>;
 }
 
 export default function App() {
-  const [users, setUsers] = useState<any[]>([]);
-  const [sessions, setSessions] = useState<Record<string, string>>({});
   const [user, setUser] = useState<any>(null);
-  const [pick, setPick] = useState("");
-  const [password, setPassword] = useState("");
   const [sid, setSid] = useState<string | null>(null);
   const [tab, setTab] = useState<(typeof TABS)[number]>("Pipeline");
   const [banner, setBanner] = useState<Banner>(null);
   const [busy, setBusy] = useState("");
   const [rev, setRev] = useState(0);
-
-  useEffect(() => {
-    api("/users").then((u) => {
-      setUsers(u);
-      setPick(u.find((x: any) => x.is_human)?.id ?? "");
-    }).catch((e) => setBanner({ kind: "bad", title: "API unreachable", text: String(e.message) }));
-  }, []);
-
+  const [authOpen, setAuthOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const actionRunning = useRef(false);
+  const system = useLoad(sid ? `/systems/${sid}` : null, rev);
   const act: Act = async (label, fn, done) => {
-    setBusy(label);
-    setBanner(null);
-    try {
-      await fn();
-      if (done) setBanner({ kind: "ok", title: done, text: "" });
-    } catch (e) {
-      const enforced = e instanceof ApiError && e.enforced;
-      setBanner({ kind: "bad", title: enforced ? "Rejected by the database" : "Could not complete", text: (e as Error).message });
-    } finally {
-      setBusy("");
-      setRev((r) => r + 1);
-    }
+    if (actionRunning.current) return;
+    actionRunning.current = true; setBusy(label); setBanner(null);
+    try { await fn(); if (done) setBanner({ kind: "ok", title: done, text: "" }); }
+    catch (e) { setBanner({ kind: "bad", title: e instanceof ApiError && e.enforced ? "Action needs attention" : "Could not complete this action", text: (e as Error).message }); }
+    finally { actionRunning.current = false; setBusy(""); setRev((r) => r + 1); }
   };
+  const openSystem = (id: string) => { setSid(id); setTab("Pipeline"); setBanner(null); setMenuOpen(false); };
+  const inventory = () => { setSid(null); setBanner(null); setMenuOpen(false); };
+  return <Session.Provider value={{ signedIn: !!user, busy }}>
+    <a className="skip-link" href="#main-content">Skip to content</a>
+    <div className="app-shell">
+      <aside className={`sidebar ${menuOpen ? "is-open" : ""}`} aria-label="Main navigation">
+        <a className="brand" href="#" onClick={(e) => { e.preventDefault(); inventory(); }}><span className="brand-mark"><Icon name="shield" size={25}/></span><span>Validation<span className="brand-sub">MACHINE</span></span></a>
+        <div className="nav-caption">WORKSPACE</div>
+        <button className={`nav-item ${!sid ? "active" : ""}`} onClick={inventory} aria-current={!sid ? "page" : undefined}><Icon name="grid"/>System inventory</button>
+        <div className="nav-caption">VALIDATION WORKSPACE</div>
+        <nav>{TABS.map((t, i) => <button key={t} className={`nav-item ${sid && tab === t ? "active" : ""}`} disabled={!sid} aria-current={sid && tab === t ? "page" : undefined} onClick={() => { setTab(t); setMenuOpen(false); }}><Icon name={TAB_ICONS[i]}/>{t}{sid && tab === t && <span className="nav-active-dot"/>}</button>)}</nav>
+        {!sid && <p className="nav-hint">Open a system to access its validation workspace.</p>}
+        <div className="sidebar-footer"><Icon name="shield"/><div>Evidence at every step<span>Draft · Review · Validate</span></div></div>
+      </aside>
+      {menuOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMenuOpen(false)}/>}
+      <div className="workspace">
+        <header className="topbar"><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><Icon name="menu"/></button><div className="breadcrumbs"><button onClick={inventory}>Workspace</button><span>/</span><span>{sid ? system.data?.name ?? "System" : "System inventory"}</span>{sid && <><span>/</span><strong>{tab}</strong></>}</div><button className="profile-button" aria-label={user ? `Account: ${user.display_name}` : "Sign in to your account"} disabled={!!busy} onClick={() => setAuthOpen(true)}><span className="avatar">{user ? user.display_name.slice(0, 2).toUpperCase() : <Icon name="shield" size={17}/>}</span><span>{user?.display_name ?? "Guest access"}<small>{user ? user.role.replace(/_/g, " ") : "Sign in to make changes"}</small></span></button></header>
+        <main id="main-content">
+          {banner && <div className={`banner ${banner.kind}`} role={banner.kind === "bad" ? "alert" : "status"}><Icon name={banner.kind === "bad" ? "alert" : "check"}/><div><b>{banner.title}</b>{banner.text}</div><button className="icon-button" aria-label="Dismiss notification" onClick={() => setBanner(null)}><Icon name="close" size={16}/></button></div>}
+          {busy && <div className="activity-banner" role="status"><span className="spinner"/><div><b>{busy}…</b><span>We’ll refresh the workspace when this finishes.</span></div></div>}
+          {!user && <div className="guest-banner"><span>You’re viewing the workspace. Sign in to draft, review, or register a system.</span><button className="link" onClick={() => setAuthOpen(true)}>Sign in <Icon name="arrow" size={15}/></button></div>}
+          {!sid ? <Inventory rev={rev} act={act} open={openSystem} signedIn={!!user}/> : <>
+            <div className="page-heading"><div><span className="eyebrow">SYSTEM WORKSPACE</span><h1>{tab === "Pipeline" ? "Validation pipeline" : tab}</h1><p>{TAB_DESCRIPTIONS[tab]}</p></div></div>
+            <SystemHeader sid={sid} rev={rev} act={act}/>
+            <div key={`${sid}:${tab}`}>
+              {tab === "Pipeline" && <Pipeline sid={sid} rev={rev} act={act} navigate={setTab}/>}
+              {tab === "Traceability" && <Trace sid={sid} rev={rev} act={act}/>}
+              {tab === "Execution" && <Executions sid={sid} rev={rev} act={act}/>}
+              {tab === "Deviations" && <Deviations sid={sid} rev={rev} act={act}/>}
+              {tab === "Review" && <Review sid={sid} rev={rev} act={act}/>}
+              {tab === "Change control" && <Changes sid={sid} rev={rev} act={act}/>}
+              {tab === "Audit trail" && <Audit rev={rev} act={act}/>}
+            </div>
+          </>}
+          <footer className="workspace-footer">The Validation Machine<span>From requirements to recorded evidence</span></footer>
+        </main>
+      </div>
+    </div>
+    {authOpen && <AuthDialog user={user} close={() => setAuthOpen(false)} signIn={(u) => { setUser(u); setAuthOpen(false); setRev((v) => v + 1); }} signOut={() => { setToken(""); setUser(null); setAuthOpen(false); setRev((v) => v + 1); }}/>}
+  </Session.Provider>;
+}
 
-  const signIn = () =>
-    act("Signing in", async () => {
-      let token = sessions[pick];
-      if (!token) {
-        const r = await api("/login", { user_id: pick, password });
-        token = r.token;
-        setSessions((s) => ({ ...s, [pick]: token }));
-      }
-      setToken(token);
-      setUser(users.find((u) => u.id === pick));
-      setPassword("");
-    });
-
-  return (
-    <>
-      <header className="top">
-        <h1>The Validation Machine</h1>
-        {sid && <button className="link" onClick={() => setSid(null)}>All systems</button>}
-        <span className="spacer" />
-        {busy && <span className="chip warn">{busy}...</span>}
-        <span className="who">{user ? <>Acting as <b>{user.display_name}</b></> : "Not signed in"}</span>
-        <select value={pick} onChange={(e) => setPick(e.target.value)}>
-          {users.filter((u) => u.is_human).map((u) => <option key={u.id} value={u.id}>{u.id} ({u.role.replace("_", " ")})</option>)}
-        </select>
-        {!sessions[pick] && (
-          <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)}
-                 onKeyDown={(e) => e.key === "Enter" && signIn()} />
-        )}
-        <button onClick={signIn} disabled={!pick || !!busy}>{sessions[pick] ? "Switch" : "Sign in"}</button>
-      </header>
-      <main>
-        {banner && (
-          <div className={`banner ${banner.kind}`}>
-            <b>{banner.title}</b>
-            {banner.text}
-          </div>
-        )}
-        {!sid ? <Inventory rev={rev} act={act} open={setSid} signedIn={!!user} /> : (
-          <>
-            <SystemHeader sid={sid} rev={rev} act={act} />
-            <nav className="tabs">
-              {TABS.map((t) => <button key={t} className={t === tab ? "on" : ""} onClick={() => setTab(t)}>{t}</button>)}
-            </nav>
-            {tab === "Pipeline" && <Pipeline sid={sid} rev={rev} act={act} />}
-            {tab === "Traceability" && <Trace sid={sid} rev={rev} act={act} />}
-            {tab === "Execution" && <Executions sid={sid} rev={rev} act={act} />}
-            {tab === "Deviations" && <Deviations sid={sid} rev={rev} act={act} />}
-            {tab === "Review" && <Review sid={sid} rev={rev} act={act} />}
-            {tab === "Change control" && <Changes sid={sid} rev={rev} act={act} />}
-            {tab === "Audit trail" && <Audit rev={rev} act={act} />}
-          </>
-        )}
-      </main>
-    </>
-  );
+function Modal({ title, close, children }: { title: string; close: () => void; children: ReactNode }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { const previous = document.activeElement as HTMLElement | null; dialog.current?.showModal(); return () => { previous?.focus(); }; }, []);
+  return <dialog ref={dialog} className="modal" aria-labelledby="dialog-title" onCancel={(e) => { e.preventDefault(); close(); }}><div className="modal-heading"><h2 id="dialog-title">{title}</h2><button className="icon-button" onClick={close} aria-label="Close dialog"><Icon name="close"/></button></div>{children}</dialog>;
+}
+function AuthDialog({ user, close, signIn, signOut }: { user: any; close: () => void; signIn: (user: any) => void; signOut: () => void }) {
+  const users = useLoad<any[]>("/users", 0);
+  const [pick, setPick] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [working, setWorking] = useState(false);
+  const humans = users.data?.filter((u) => u.is_human) ?? [];
+  const selected = pick || humans[0]?.id || "";
+  return <Modal title={user ? "Your account" : "Welcome to your workspace"} close={close}>
+    <p className="muted">{user ? `Signed in as ${user.display_name}. You can switch accounts below.` : "Sign in with your workspace account to begin validation."}</p>
+    {pending(users) ? <LoadState resources={[users]}/> : <form onSubmit={async (e) => { e.preventDefault(); if (working) return; setWorking(true); setError(""); try { const r = await api("/login", { user_id: selected, password }); setToken(r.token); signIn(humans.find((u) => u.id === selected)); } catch (e) { setError((e as Error).message); } finally { setWorking(false); } }}>
+      <label htmlFor="account">Workspace account</label><select id="account" value={selected} onChange={(e) => setPick(e.target.value)}>{humans.map((u) => <option key={u.id} value={u.id}>{u.display_name} · {u.role.replace(/_/g, " ")}</option>)}</select>
+      <label htmlFor="password">Password</label><input id="password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required/>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <div className="modal-actions">{user && <button type="button" onClick={signOut} disabled={working}>Sign out</button>}<button className="primary" disabled={!selected || !password || working}>{working ? "Signing in…" : user ? "Switch account" : "Sign in"}<Icon name="arrow" size={16}/></button></div>
+    </form>}
+  </Modal>;
 }
 
 function Inventory({ rev, act, open, signedIn }: { rev: number; act: Act; open: (id: string) => void; signedIn: boolean }) {
-  const systems = useLoad<any[]>("/systems", rev) ?? [];
+  const resource = useLoad<any[]>("/systems", rev);
+  const systems = resource.data ?? [];
+  const [register, setRegister] = useState(false);
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("all");
+  const loaded = !pending(resource);
+  const visible = systems.filter((s) => `${s.name} ${s.intended_use}`.toLowerCase().includes(search.toLowerCase()) && (status === "all" || s.status === status));
+  const stats = [
+    { label: "Registered systems", value: systems.length, icon: "grid", note: "Across your workspace", color: "blue" },
+    { label: "Validated systems", value: systems.filter((s) => s.status === "validated").length, icon: "check", note: "Released as validated", color: "green" },
+    { label: "Open deviations", value: systems.reduce((n, s) => n + Number(s.open_deviations ?? 0), 0), icon: "alert", note: "Investigation or resolution needed", color: "amber" },
+    { label: "Traceability gaps", value: systems.reduce((n, s) => n + Number(s.open_gaps ?? 0), 0), icon: "link", note: "Coverage requiring attention", color: "purple" },
+  ];
+  return <>
+    <div className="page-heading"><div><span className="eyebrow">YOUR VALIDATION WORKSPACE</span><h1>System inventory</h1><p>A clear view of your systems, validation progress, and what needs attention.</p></div><button className="primary" onClick={() => setRegister(true)}><Icon name="plus" size={18}/>Register system</button></div>
+    <div className="stats-grid">{stats.map((s) => <div className="stat-card" key={s.label}><div className="stat-top"><span>{s.label}</span><span className={`stat-icon ${s.color}`}><Icon name={s.icon}/></span></div><strong>{loaded ? s.value : "—"}</strong><small>{s.note}</small></div>)}</div>
+    <section className="panel inventory-panel"><div className="section-heading"><div><h2>All systems <span className="count">{loaded ? systems.length : "—"}</span></h2><p>Open a system to continue its validation journey.</p></div></div>
+      <div className="table-toolbar"><div className="search-field"><Icon name="search" size={18}/><input aria-label="Search systems" placeholder="Search systems or intended use…" value={search} onChange={(e) => setSearch(e.target.value)}/></div><select aria-label="Filter systems by status" value={status} onChange={(e) => setStatus(e.target.value)}><option value="all">All statuses</option>{Array.from(new Set(systems.map((s) => s.status))).map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}</select></div>
+      {pending(resource) ? <LoadState resources={[resource]}/> : systems.length === 0 ? <div className="empty-state spacious"><span className="empty-icon"><Icon name="layers" size={30}/></span><h3>Your first validation starts here</h3><p>Register a system and describe its intended use to get started.</p><button className="primary" onClick={() => setRegister(true)}><Icon name="plus" size={16}/>Register your first system</button></div> : <Table cols={["System", "Status", "Classification", "Needs attention", "Last executed", ""]} rows={visible.map((s) => [
+        <div className="system-cell"><span className="system-icon"><Icon name="layers"/></span><div><button className="system-name" onClick={() => open(s.id)}>{s.name}</button><span className="system-description">{s.intended_use}</span></div></div>,
+        <Chip v={s.status}/>, <div className="classification">{s.gxp_impact ? `${s.gxp_impact} GxP impact` : "Not assessed"}<small>{s.gamp_category ? `GAMP category ${s.gamp_category}` : "Classification pending"}</small></div>,
+        <div className="attention-cell"><span className={s.open_deviations ? "attention" : "muted"}>{s.open_deviations} deviations</span><span className={s.open_gaps ? "attention" : "muted"}>{s.open_gaps} gaps</span></div>,
+        <span className="date-cell">{s.last_executed ? fmt(s.last_executed) : "Not executed yet"}</span>,
+        <button className="open-button" aria-label={`Open ${s.name}`} onClick={() => open(s.id)}>Open<Icon name="arrow" size={16}/></button>,
+      ])} empty="No systems match your search. Try another name or status."/>}
+      {loaded && systems.length > 0 && <div className="table-footer">Showing {visible.length} of {systems.length} systems{(search || status !== "all") && <button className="link" onClick={() => { setSearch(""); setStatus("all"); }}>Clear filters</button>}</div>}
+    </section>
+    <div className="workspace-note"><Icon name="shield"/><p><b>A connected validation record</b>Keep requirements, protocols, evidence, and approvals together throughout the system lifecycle.</p></div>
+    {register && <Registration act={act} open={open} signedIn={signedIn} close={() => setRegister(false)}/>}
+  </>;
+}
+function Registration({ act, open, signedIn, close }: { act: Act; open: (id: string) => void; signedIn: boolean; close: () => void }) {
+  const { busy } = useContext(Session);
   const [f, setF] = useState({ name: "", repo_path: "", intended_use: "", sop: "" });
   const set = (k: keyof typeof f) => (e: any) => setF({ ...f, [k]: e.target.value });
-  const demo = (which: string) =>
-    act("Loading demo", async () => {
-      const d = await api("/demo");
-      setF({ name: `${d.name} (${which})`, repo_path: d.repo_path, intended_use: d.intended_use[which], sop: d.sop });
-    });
-  return (
-    <>
-      <div className="panel">
-        <h2>System inventory</h2>
-        <Table
-          cols={["System", "Status", "GxP impact", "GAMP", "Open gaps", "Open deviations", "Last executed", ""]}
-          rows={systems.map((s) => [s.name, <Chip v={s.status} />, s.gxp_impact, s.gamp_category, s.open_gaps, s.open_deviations,
-            fmt(s.last_executed), <button onClick={() => open(s.id)}>Open</button>])}
-          empty="No systems registered yet."
-        />
-      </div>
-      <div className="panel">
-        <h2>Register a system for validation</h2>
-        <div className="row">
-          <span className="muted small">Demo target:</span>
-          <button onClick={() => demo("submission")}>CDM Query Bot, data submitted to FDA</button>
-          <button onClick={() => demo("internal")}>CDM Query Bot, internal dashboard</button>
-        </div>
-        <div className="grid2">
-          <div><label>System name</label><input style={{ width: "100%" }} value={f.name} onChange={set("name")} /></div>
-          <div><label>Repository path</label><input style={{ width: "100%" }} value={f.repo_path} onChange={set("repo_path")} /></div>
-          <div><label>Intended-use statement</label><textarea value={f.intended_use} onChange={set("intended_use")} /></div>
-          <div><label>Company CSV SOP</label><textarea value={f.sop} onChange={set("sop")} /></div>
-        </div>
-        <p>
-          <button className="primary" disabled={!signedIn || !f.name || !f.repo_path || !f.intended_use}
-                  onClick={() => act("Registering", async () => open((await api("/systems", f)).id))}>
-            Register
-          </button>
-          {!signedIn && <span className="muted small"> Sign in first.</span>}
-        </p>
-      </div>
-    </>
-  );
+  const [error, setError] = useState("");
+  const demo = (which: string) => act("Loading example", async () => { try { const d = await api("/demo"); setF({ name: `${d.name} (${which})`, repo_path: d.repo_path, intended_use: d.intended_use[which], sop: d.sop }); setError(""); } catch (e) { setError((e as Error).message); throw e; } });
+  return <Modal title="Register a system" close={close}><p className="muted">Tell us what the system does and how it will be used. This provides context for its validation plan.</p>
+    <div className="demo-options"><span>Try an example</span><button disabled={!!busy} onClick={() => demo("submission")}>FDA submission</button><button disabled={!!busy} onClick={() => demo("internal")}>Internal dashboard</button></div>
+    <form onSubmit={(e) => { e.preventDefault(); act("Registering system", async () => { try { const s = await api("/systems", f); close(); open(s.id); } catch (e) { setError((e as Error).message); throw e; } }); }}>
+      <label htmlFor="system-name">System name <span>*</span></label><input id="system-name" value={f.name} onChange={set("name")} placeholder="e.g. CDM Query Bot" required/>
+      <label htmlFor="repo-path">Repository path <span>*</span></label><input id="repo-path" value={f.repo_path} onChange={set("repo_path")} placeholder="Absolute path to the system repository" required/><small className="field-hint">Use a folder accessible to the backend server.</small>
+      <label htmlFor="intended-use">Intended use <span>*</span></label><textarea id="intended-use" value={f.intended_use} onChange={set("intended_use")} placeholder="Who uses this system, for what purpose, and how are its outputs used?" required/>
+      <label htmlFor="sop">Company validation SOP <span className="muted">(optional)</span></label><textarea id="sop" value={f.sop} onChange={set("sop")} placeholder="Paste the relevant standard operating procedure…"/>
+      {!signedIn && <p className="form-error">Sign in from the workspace header before registering a system.</p>}{error && <p className="form-error" role="alert">{error}</p>}
+      <div className="modal-actions"><button type="button" onClick={close}>Cancel</button><button className="primary" disabled={!signedIn || !!busy || !f.name.trim() || !f.repo_path.trim() || !f.intended_use.trim()}>{busy || "Register system"}<Icon name="arrow" size={16}/></button></div>
+    </form>
+  </Modal>;
 }
-
 function SystemHeader({ sid, rev, act }: P) {
-  const s = useLoad<any>(`/systems/${sid}`, rev);
+  const resource = useLoad(`/systems/${sid}`, rev);
+  const { signedIn, busy } = useContext(Session);
+  if (pending(resource)) return <LoadState resources={[resource]}/>;
+  const s = resource.data;
   if (!s) return null;
-  return (
-    <div className="panel">
-      <div className="row">
-        <h2 style={{ margin: 0 }}>{s.name}</h2>
-        <Chip v={s.status} />
-        {s.gxp_impact && <span className="chip">GxP impact: {s.gxp_impact}</span>}
-        {s.gamp_category && <span className="chip">GAMP category {s.gamp_category}</span>}
-        <span style={{ flex: 1 }} />
-        <a href={`/api/systems/${sid}/package`} target="_blank" rel="noreferrer">Validation package</a>
-        <button onClick={() => act("Updating status", () => api(`/systems/${sid}/status/validated`, {}), "System released as validated")}>
-          Release as validated
-        </button>
-      </div>
-      <p className="muted small" style={{ marginBottom: 0 }}>{s.intended_use}</p>
-    </div>
-  );
+  return <section className="panel system-summary"><div className="system-summary-main"><span className="system-icon large"><Icon name="layers" size={25}/></span><div><div className="row"><h2>{s.name}</h2><Chip v={s.status}/></div><p className="muted">{s.intended_use}</p><div className="system-meta"><span>GxP impact <b>{s.gxp_impact ?? "Not assessed"}</b></span><span>GAMP category <b>{s.gamp_category ?? "Pending"}</b></span></div></div></div><div className="system-actions"><a className="button" href={`/api/systems/${sid}/package`} target="_blank" rel="noreferrer"><Icon name="doc" size={16}/>Validation package</a><button disabled={!signedIn || !!busy || s.status === "validated"} onClick={() => act("Updating status", () => api(`/systems/${sid}/status/validated`, {}), "System released as validated")}>{s.status === "validated" ? "Released as validated" : "Release as validated"}</button></div></section>;
 }
-
 const STAGES = [
-  ["plan", "Plan and categorise", "Validation Plan, GxP impact, GAMP category", ["VP"]],
-  ["specs", "Specify", "URS, FS and DS with source links", ["URS", "FS", "DS"]],
-  ["risk", "Assess risk", "Function-level risk with rationale", ["RA"]],
-  ["protocols", "Author tests", "IQ, OQ and PQ protocols", ["IQ", "OQ", "PQ"]],
-  ["vsr", "Summarise", "Validation Summary Report from records", ["VSR"]],
+  ["plan", "Plan & classify", "Define intended use, GxP impact, and the validation approach.", ["VP"]],
+  ["specs", "Specify", "Connect user needs to functional and design requirements.", ["URS", "FS", "DS"]],
+  ["risk", "Assess risk", "Evaluate function-level risks and their rationale.", ["RA"]],
+  ["protocols", "Author tests", "Draft installation, operational, and performance protocols.", ["IQ", "OQ", "PQ"]],
+  ["vsr", "Summarise", "Bring validation records into a final summary report.", ["VSR"]],
 ] as const;
-
-function Pipeline({ sid, rev, act }: P) {
-  const s = useLoad<any>(`/systems/${sid}`, rev);
+function Pipeline({ sid, rev, act, navigate }: P & { navigate: (tab: (typeof TABS)[number]) => void }) {
+  const resource = useLoad(`/systems/${sid}`, rev);
+  const { signedIn, busy } = useContext(Session);
   const [openId, setOpenId] = useState<string | null>(null);
-  const arts: any[] = (s?.artifacts ?? []).filter((a: any) => a.current);
-  return (
-    <>
-      <div className="panel">
-        <h2>Lifecycle</h2>
-        <div className="stages">
-          {STAGES.map(([key, title, sub, kinds], i) => (
-            <div className="stage" key={key}>
-              <div className="n">Step {i + 1}</div>
-              <b>{title}</b>
-              <div className="muted small">{sub}</div>
-              <div className="row" style={{ margin: "8px 0" }}>
-                {kinds.map((k) => {
-                  const a = arts.find((x) => x.kind === k);
-                  return <span key={k} className={`chip ${tone(a?.status)}`}>{k}{a ? ` v${a.version} ${a.status}` : ""}</span>;
-                })}
-              </div>
-              <button onClick={() => act(`Drafting (${title})`, () => api(`/systems/${sid}/run/${key}`, {}))}>Draft with agent</button>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="panel">
-        <h2>Deliverables</h2>
-        <Table
-          cols={["Document", "Version", "Status", "Author", "Created", ""]}
-          rows={arts.map((a) => [a.title, a.version, <Chip v={a.status} />, <code>{a.author_id}</code>, fmt(a.created_at),
-            <button onClick={() => setOpenId(a.id === openId ? null : a.id)}>{a.id === openId ? "Close" : "Review"}</button>])}
-          empty="Run step 1 to draft the first deliverable."
-        />
-      </div>
-      {openId && <Document aid={openId} rev={rev} act={act} />}
-    </>
-  );
+  const [filter, setFilter] = useState("all");
+  if (pending(resource)) return <LoadState resources={[resource]}/>;
+  const arts: any[] = (resource.data?.artifacts ?? []).filter((a: any) => a.current);
+  const approved = arts.filter((a) => a.status === "approved").length;
+  const stageInfo = STAGES.map(([key, title, description, kinds]) => {
+    const docs = arts.filter((a) => (kinds as readonly string[]).includes(a.kind));
+    return { key, title, description, kinds, docs, drafted: kinds.every((kind) => docs.some((a) => a.kind === kind)), complete: kinds.every((kind) => docs.some((a) => a.kind === kind && a.status === "approved")) };
+  });
+  const nextIndex = stageInfo.findIndex((s) => !s.complete);
+  const next = stageInfo[nextIndex];
+  const reviewDoc = next?.docs.find((a) => a.status !== "approved");
+  const run = (stage: typeof stageInfo[number]) => act(`Drafting ${stage.title.toLowerCase()}`, () => api(`/systems/${sid}/run/${stage.key}`, {}), `${stage.title} documents drafted`);
+  const visible = arts.filter((a) => filter === "all" || (filter === "pending" ? a.status !== "approved" : a.status === "approved"));
+  return <>
+    <section className="next-action"><div className="next-action-content"><span className="eyebrow">{next ? "RECOMMENDED NEXT STEP" : "DOCUMENT APPROVALS COMPLETE"}</span><h2>{next ? next.drafted ? `Review ${["the validation plan", "specifications", "the risk assessment", "test protocols", "the summary report"][nextIndex]}` : nextIndex === 0 ? "Start with a validation plan" : `Continue: ${next.title.toLowerCase()}` : "Review the complete validation package"}</h2><p>{next ? next.drafted ? "Your drafts are ready. Review the content and apply the appropriate signatures." : next.description : "Check execution results, deviations, and package findings before release."}</p></div><button className="primary" disabled={!!busy || (!!next && !next.drafted && !signedIn)} onClick={() => next ? next.drafted && reviewDoc ? setOpenId(reviewDoc.id) : run(next) : navigate("Review")}>{next ? next.drafted ? "Review documents" : "Draft with agent" : "Open package review"}<Icon name="arrow" size={17}/></button></section>
+    <section className="panel lifecycle-panel"><div className="section-heading"><div><h2>Validation lifecycle</h2><p>A suggested sequence. Review and approve each generated deliverable.</p></div><span className="progress-label">{stageInfo.filter((s) => s.complete).length} of 5 stages approved</span></div><div className="lifecycle-progress" aria-label={`${stageInfo.filter((s) => s.complete).length} of 5 stages approved`}>{stageInfo.map((s, i) => <span key={s.key} className={s.complete ? "complete" : i === nextIndex ? "current" : ""}/>)}</div><div className="stages">{stageInfo.map((stage, i) => <article key={stage.key} className={`stage ${stage.complete ? "complete" : i === nextIndex ? "current" : ""}`}><div className="stage-top"><span className="stage-number">{stage.complete ? <Icon name="check" size={19}/> : `0${i + 1}`}</span><span className="stage-state">{stage.complete ? "Approved" : stage.drafted ? "Needs review" : i === nextIndex ? "Up next" : "Not drafted"}</span></div><h3>{stage.title}</h3><p>{stage.description}</p><div className="stage-docs">{stage.kinds.map((k) => { const a = stage.docs.find((d) => d.kind === k); return <span key={k} title={a ? `${k} v${a.version} · ${a.status}` : `${k} not drafted`} className={`mini-chip ${tone(a?.status)}`}>{k}{a?.status === "approved" && " ✓"}</span>; })}</div>{stage.docs.length > 0 && <button onClick={() => setOpenId((stage.docs.find((a) => a.status !== "approved") ?? stage.docs[0]).id)}>Review deliverables<Icon name="arrow" size={14}/></button>}<button className={stage.docs.length ? "link stage-redraft" : "stage-draft"} disabled={!signedIn || !!busy} onClick={() => run(stage)}>{stage.docs.length ? "Draft new version" : "Draft with agent"}</button></article>)}</div></section>
+    <section className="panel deliverables-panel"><div className="section-heading"><div><h2>Deliverables <span className="count">{arts.length}</span></h2><p>{approved} approved · {arts.length - approved} awaiting approval</p></div><select aria-label="Filter deliverables" value={filter} onChange={(e) => setFilter(e.target.value)}><option value="all">All deliverables</option><option value="pending">Awaiting approval</option><option value="approved">Approved</option></select></div><Table cols={["Document", "Version", "Status", "Author", "Created", ""]} rows={visible.map((a) => [<div className="document-cell"><span className="document-icon"><Icon name="doc"/></span><div><b>{a.title}</b><small>{a.kind}</small></div></div>, <span className="version">v{a.version}</span>, <Chip v={a.status}/>, <span className="author-label">{a.author_id}</span>, <span className="date-cell">{fmt(a.created_at)}</span>, <button className="open-button" onClick={() => setOpenId(a.id)}>Review<Icon name="arrow" size={15}/></button>])} empty={arts.length ? "No deliverables match this filter." : "Draft your validation plan to create the first deliverable."}/></section>
+    {openId && <Modal title="Document review" close={() => setOpenId(null)}><Document aid={openId} rev={rev} act={act}/></Modal>}
+  </>;
 }
 
 function Document({ aid, rev, act }: { aid: string; rev: number; act: Act }) {
-  const a = useLoad<any>(`/artifacts/${aid}`, rev);
+  const resource = useLoad<any>(`/artifacts/${aid}`, rev);
+  const a = resource.data;
+  const { signedIn, busy } = useContext(Session);
   const [password, setPassword] = useState("");
   const [meaning, setMeaning] = useState("approved");
+  if (pending(resource)) return <LoadState resources={[resource]}/>;
   if (!a) return null;
   const html = DOMPurify.sanitize(marked.parse(a.content, { async: false }) as string);
   const executable = ["IQ", "OQ", "PQ"].includes(a.kind);
@@ -267,17 +270,17 @@ function Document({ aid, rev, act }: { aid: string; rev: number; act: Act }) {
         </div>
       ))}
       <div className="row" style={{ marginTop: 10 }}>
-        <select value={meaning} onChange={(e) => setMeaning(e.target.value)}>
+        <select aria-label="Signature meaning" value={meaning} onChange={(e) => setMeaning(e.target.value)}>
           <option value="approved">Approved</option>
           <option value="reviewed">Reviewed</option>
         </select>
-        <input type="password" placeholder="Re-enter password to sign" value={password} onChange={(e) => setPassword(e.target.value)} />
-        <button className="primary" disabled={!password}
+        <input aria-label="Password for electronic signature" autoComplete="current-password" type="password" placeholder="Re-enter password to sign" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <button className="primary" disabled={!password || !signedIn || !!busy}
                 onClick={() => act("Signing", async () => { await api(`/artifacts/${aid}/sign`, { password, meaning }); setPassword(""); }, "Signature applied")}>
           Sign
         </button>
         {executable && (
-          <button onClick={() => act("Executing protocol", () => api(`/artifacts/${aid}/execute`, {}), "Protocol executed; see Execution")}>
+          <button disabled={!signedIn || !!busy || a.status !== "approved"} onClick={() => act("Executing protocol", () => api(`/artifacts/${aid}/execute`, {}), "Protocol executed; see Execution")}>
             Execute protocol
           </button>
         )}
@@ -287,9 +290,13 @@ function Document({ aid, rev, act }: { aid: string; rev: number; act: Act }) {
 }
 
 function Trace({ sid, rev }: P) {
-  const rows = useLoad<any[]>(`/systems/${sid}/trace`, rev) ?? [];
-  const gaps = useLoad<any[]>(`/systems/${sid}/gaps`, rev) ?? [];
-  const risks = useLoad<any[]>(`/systems/${sid}/risks`, rev) ?? [];
+  const trace = useLoad<any[]>(`/systems/${sid}/trace`, rev);
+  const gapData = useLoad<any[]>(`/systems/${sid}/gaps`, rev);
+  const riskData = useLoad<any[]>(`/systems/${sid}/risks`, rev);
+  if (pending(trace, gapData, riskData)) return <LoadState resources={[trace, gapData, riskData]}/>;
+  const rows = trace.data ?? [];
+  const gaps = gapData.data ?? [];
+  const risks = riskData.data ?? [];
   return (
     <>
       <div className="panel">
@@ -319,9 +326,11 @@ function Trace({ sid, rev }: P) {
 }
 
 function Executions({ sid, rev, act }: P) {
-  const execs = useLoad<any[]>(`/systems/${sid}/executions`, rev) ?? [];
+  const resource = useLoad<any[]>(`/systems/${sid}/executions`, rev);
+  const execs = resource.data ?? [];
   const [log, setLog] = useState<string | null>(null);
   const [verified, setVerified] = useState<Record<string, string>>({});
+  if (pending(resource)) return <LoadState resources={[resource]}/>;
   if (!execs.length) return <div className="panel"><p className="muted">No executions yet. Approve a protocol, then execute it from the Pipeline tab.</p></div>;
   return (
     <>
@@ -352,9 +361,11 @@ function Executions({ sid, rev, act }: P) {
 }
 
 function Deviations({ sid, rev, act }: P) {
-  const devs = useLoad<any[]>(`/systems/${sid}/deviations`, rev) ?? [];
+  const resource = useLoad<any[]>(`/systems/${sid}/deviations`, rev);
+  const devs = resource.data ?? [];
   const [retests, setRetests] = useState<Record<string, string>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  if (pending(resource)) return <LoadState resources={[resource]}/>;
   if (!devs.length) return <div className="panel"><p className="muted">No deviations.</p></div>;
   return (
     <>
@@ -402,8 +413,10 @@ function Deviations({ sid, rev, act }: P) {
 }
 
 function Review({ sid, rev, act }: P) {
-  const data = useLoad<any>(`/systems/${sid}/findings`, rev);
+  const resource = useLoad<any>(`/systems/${sid}/findings`, rev);
+  const data = resource.data;
   const [ext, setExt] = useState("");
+  if (pending(resource)) return <LoadState resources={[resource]}/>;
   return (
     <>
       <div className="panel">
@@ -437,12 +450,14 @@ function Review({ sid, rev, act }: P) {
 }
 
 function Changes({ sid, rev, act }: P) {
-  const changes = useLoad<any[]>(`/systems/${sid}/changes`, rev) ?? [];
+  const resource = useLoad<any[]>(`/systems/${sid}/changes`, rev);
+  const changes = resource.data ?? [];
   const [f, setF] = useState({ kind: "code_diff", description: "", diff: "" });
   const demo = () => act("Loading demo change", async () => {
     const d = await api("/demo");
     setF({ kind: "code_diff", description: "Refactor: tidy configuration constants", diff: d.changes["01_threshold_refactor"] });
   });
+  if (pending(resource)) return <LoadState resources={[resource]}/>;
   return (
     <>
       <div className="panel">
@@ -487,8 +502,10 @@ function Changes({ sid, rev, act }: P) {
 }
 
 function Audit({ rev, act }: { rev: number; act: Act }) {
-  const events = useLoad<any[]>("/audit?limit=300", rev) ?? [];
+  const resource = useLoad<any[]>("/audit?limit=300", rev);
+  const events = resource.data ?? [];
   const [chain, setChain] = useState<any>(null);
+  if (pending(resource)) return <LoadState resources={[resource]}/>;
   return (
     <div className="panel">
       <div className="row">
