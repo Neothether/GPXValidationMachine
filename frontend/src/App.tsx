@@ -2,6 +2,7 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, fmt, setSignedOutHandler } from "./api";
+import HelixBackground from "./Helix";
 
 type Act = (label: string, fn: () => Promise<unknown>, done?: string) => Promise<void>;
 type Banner = { kind: "ok" | "bad"; title: string; text: string } | null;
@@ -103,12 +104,23 @@ export default function App() {
   };
   const openSystem = (id: string) => { setSid(id); setTab("Pipeline"); setBanner(null); setMenuOpen(false); };
   const inventory = () => { setSid(null); setBanner(null); setMenuOpen(false); };
-  if (!sessionChecked) return <div className="signin-page"><span className="spinner"/></div>;
-  if (!user) return <div className="signin-page"><div className="signin-card">
-    <div className="signin-brand"><span className="brand-mark"><Icon name="shield" size={25}/></span><div><strong>Validation Machine</strong><span>Sign in to continue</span></div></div>
-    <p className="muted">Validation records are available to authorised accounts only.</p>
-    <SignInForm onSignedIn={(u) => { setUser(u); setRev((v) => v + 1); }}/>
-  </div></div>;
+  if (!sessionChecked) return <div className="signin-page loading"><span className="spinner"/></div>;
+  if (!user) return <div className="signin-page"><HelixBackground/>
+    <div className="signin-layout">
+      <div className="signin-hero">
+        <span className="signin-wordmark"><span className="brand-mark"><Icon name="shield" size={22}/></span>Validation Machine</span>
+        <span className="eyebrow">GXP COMPUTER SYSTEM VALIDATION</span>
+        <h1>From requirements to <em>recorded</em> evidence.</h1>
+        <p>Draft, test, review and release clinical software, with every approval signed and every result tied to the software version it was run on.</p>
+        <ul className="signin-points"><li>People approve, agents draft</li><li>Evidence is hashed at capture</li><li>Release follows the software version</li></ul>
+      </div>
+      <div className="signin-card">
+        <h2>Sign in</h2>
+        <p className="muted">Validation records are available to authorised accounts only.</p>
+        <SignInForm onSignedIn={(u) => { setUser(u); setRev((v) => v + 1); }}/>
+      </div>
+    </div>
+  </div>;
   return <Session.Provider value={{ signedIn: !!user, busy }}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <div className="app-shell">
@@ -130,7 +142,7 @@ export default function App() {
           {!sid ? <Inventory rev={rev} act={act} open={openSystem} signedIn={!!user}/> : <>
             <div className="page-heading"><div><span className="eyebrow">SYSTEM WORKSPACE</span><h1>{tab === "Pipeline" ? "Validation pipeline" : tab}</h1><p>{TAB_DESCRIPTIONS[tab]}</p></div></div>
             <SystemHeader sid={sid} rev={rev} act={act}/>
-            <div key={`${sid}:${tab}`}>
+            <div key={`${sid}:${tab}`} className="tab-content">
               {tab === "Pipeline" && <Pipeline sid={sid} rev={rev} act={act} navigate={setTab}/>}
               {tab === "Traceability" && <Trace sid={sid} rev={rev} act={act}/>}
               {tab === "Execution" && <Executions sid={sid} rev={rev} act={act}/>}
