@@ -64,6 +64,19 @@ def _deterministic_findings(conn, system_id) -> list[Finding]:
         out.append(Finding(severity="critical", document=f"{r['kind']} v{r['version']}", location=f"execution {r['id']}",
                            finding="Protocol was executed before it was approved.",
                            recommended_action="Raise a deviation; re-execute under an approved protocol."))
+    early: dict[str, list[str]] = {}
+    for r in conn.execute(
+            """select p.kind as protocol, p.version, s.kind as spec,
+                      (select min(signed_at) from signatures where artifact_id = p.id and meaning = 'approved') as protocol_approved,
+                      (select min(signed_at) from signatures where artifact_id = s.id and meaning = 'approved') as spec_approved
+                 from v_current_artifacts p join v_current_artifacts s on s.system_id = p.system_id
+                where p.system_id = %s and p.kind in ('IQ','OQ','PQ') and s.kind in ('URS','FS','DS','RA')""", (system_id,)):
+        if r["protocol_approved"] and (r["spec_approved"] is None or r["spec_approved"] > r["protocol_approved"]):
+            early.setdefault(f"{r['protocol']} v{r['version']}", []).append(r["spec"])
+    for doc, specs in early.items():
+        out.append(Finding(severity="major", document=doc, location="signatures",
+                           finding=f"Protocol was approved before the documents it verifies against were approved: {', '.join(sorted(specs))}.",
+                           recommended_action="Confirm the protocol still matches the approved specifications and record the review."))
     for g in conn.execute("select * from v_gaps where system_id = %s", (system_id,)):
         sev = "major" if g["gap"] in ("untested_requirement", "failing_test", "not_executed") else "minor"
         out.append(Finding(severity=sev, document="Traceability matrix", location=g["ref"],
@@ -88,7 +101,7 @@ def _package_digest(conn, system_id) -> str:
     for a in conn.execute("select * from v_current_artifacts where system_id = %s order by created_at", (system_id,)):
         sigs = conn.execute("select signer_name, meaning, signed_at from signatures where artifact_id = %s", (a["id"],)).fetchall()
         parts.append(f"\n===== {a['kind']} v{a['version']} [{a['status']}] author={a['author_id']} created={a['created_at']}\n"
-                     f"signatures: {[(s['signer_name'], s['meaning'], str(s['signed_at'])) for s in sigs]}\n{a['content'][:12000]}")
+                     f"signatures: {[(s['signer_name'], s['meaning'], str(s['signed_at'])) for s in sigs]}\n{a['content']}")
     for r in conn.execute(
             """select tc.test_id, sr.outcome, sr.recorded_at, sr.actual from step_results sr
                  join test_cases tc on tc.id = sr.test_case_id where tc.system_id = %s order by sr.recorded_at""", (system_id,)):
@@ -126,7 +139,9 @@ other. `document` and `location` must point at the exact document and test/requi
 problems you can point to; return an empty list if there are none.
 
 TASK 2 - controls: for EVERY rule in the catalog, state whether the TARGET system implements it.
-`evidence` must be a path:line citation from the repository, or 'none found'. Status 'met' requires
+`evidence` must be a path:line citation from the TARGET REPOSITORY, or 'none found'. The validation
+documents, signatures and change records in the package belong to the validation tool, not to the target:
+never cite them as evidence that the target implements a control. Status 'met' requires
 code evidence; use 'gap' when the intended use needs the control and nothing implements it;
 'not_applicable' only with a rationale tied to the intended use.""", Review)
 
@@ -140,13 +155,18 @@ code evidence; use 'gap' when the intended use needs the control and nothing imp
                 """insert into findings (system_id, severity, document, location, finding, recommended_action, found_by)
                    values (%s, %s, %s, %s, %s, %s, %s)""",
                 (system_id, f.severity, f.document, f.location, f.finding, f.recommended_action, actor))
-        names = dict(CONTROLS)
-        for c in rev.controls:
-            if c.rule in names:
+        mapped = 0
+        for rule, text in CONTROLS:     # the model may echo the rule with its description appended
+            c = next((c for c in rev.controls if c.rule.strip() == rule or c.rule.strip().startswith(rule + ":")
+                      or c.rule.strip().startswith(rule + " ")), None)
+            if c:
+                mapped += 1
                 conn.execute(
                     "insert into controls (system_id, control, rule, evidence, status, rationale) values (%s, %s, %s, %s, %s, %s)",
-                    (system_id, names[c.rule], c.rule, c.evidence, c.status, c.rationale))
-    return {"findings": len(findings), "controls": len(rev.controls)}
+                    (system_id, text, rule, c.evidence, c.status, c.rationale))
+        db.audit(conn, "review_completed", "system", system_id,
+                 {"findings": len(findings), "controls_returned": len(rev.controls), "controls_mapped": mapped})
+    return {"findings": len(findings), "controls": mapped}
 
 
 # --------------------------------------------------------------------------- Validation Summary Report

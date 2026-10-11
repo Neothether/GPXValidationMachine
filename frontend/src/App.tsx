@@ -64,6 +64,8 @@ const tone = (v?: string | null) =>
   !v ? "" : ["approved", "pass", "validated", "met", "resolved", "low"].includes(v) ? "ok"
     : ["fail", "error", "open", "gap", "critical", "high", "major"].includes(v) ? "bad"
     : ["draft", "partial", "medium", "minor", "change_pending", "in_validation"].includes(v) ? "warn" : "";
+// Older evidence logs were captured with terminal colour codes; show them as plain text.
+const plain = (log: string) => log.replace(/\x1b\[[0-9;]*m/g, "");
 const Chip = ({ v }: { v?: string | null }) => (v ? <span className={`chip ${tone(v)}`}><span className="status-dot"/>{v.replace(/_/g, " ")}</span> : null);
 function Table({ cols, rows, empty = "Nothing recorded yet." }: { cols: string[]; rows: ReactNode[][]; empty?: string }) {
   if (!rows.length) return <div className="empty-state"><Icon name="doc" size={28}/><p>{empty}</p></div>;
@@ -145,7 +147,7 @@ function AuthDialog({ user, close, signIn, signOut }: { user: any; close: () => 
   const selected = pick || humans[0]?.id || "";
   return <Modal title={user ? "Your account" : "Welcome to your workspace"} close={close}>
     <p className="muted">{user ? `Signed in as ${user.display_name}. You can switch accounts below.` : "Sign in with your workspace account to begin validation."}</p>
-    {pending(users) ? <LoadState resources={[users]}/> : <form onSubmit={async (e) => { e.preventDefault(); if (working) return; setWorking(true); setError(""); try { const r = await api("/login", { user_id: selected, password }); setToken(r.token); signIn(humans.find((u) => u.id === selected)); } catch (e) { setError((e as Error).message); } finally { setWorking(false); } }}>
+    {pending(users) ? <LoadState resources={[users]}/> : <form onSubmit={async (e) => { e.preventDefault(); if (working) return; setWorking(true); setError(""); try { const r = await api("/login", { user_id: selected, password }); setToken(r.token); signIn(humans.find((u) => u.id === selected)); } catch (e) { setError((e as Error).message); setPassword(""); } finally { setWorking(false); } }}>
       <label htmlFor="account">Workspace account</label><select id="account" value={selected} onChange={(e) => setPick(e.target.value)}>{humans.map((u) => <option key={u.id} value={u.id}>{u.display_name} · {u.role.replace(/_/g, " ")}</option>)}</select>
       <label htmlFor="password">Password</label><input id="password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required/>
       {error && <p className="form-error" role="alert">{error}</p>}
@@ -250,6 +252,8 @@ function Document({ aid, rev, act }: { aid: string; rev: number; act: Act }) {
   const { signedIn, busy } = useContext(Session);
   const [password, setPassword] = useState("");
   const [meaning, setMeaning] = useState("approved");
+  // A typed signing password never carries over to another document.
+  useEffect(() => setPassword(""), [aid]);
   if (pending(resource)) return <LoadState resources={[resource]}/>;
   if (!a) return null;
   const html = DOMPurify.sanitize(marked.parse(a.content, { async: false }) as string);
@@ -276,7 +280,7 @@ function Document({ aid, rev, act }: { aid: string; rev: number; act: Act }) {
         </select>
         <input aria-label="Password for electronic signature" autoComplete="current-password" type="password" placeholder="Re-enter password to sign" value={password} onChange={(e) => setPassword(e.target.value)} />
         <button className="primary" disabled={!password || !signedIn || !!busy}
-                onClick={() => act("Signing", async () => { await api(`/artifacts/${aid}/sign`, { password, meaning }); setPassword(""); }, "Signature applied")}>
+                onClick={() => act("Signing", async () => { const typed = password; setPassword(""); await api(`/artifacts/${aid}/sign`, { password: typed, meaning }); }, "Signature applied")}>
           Sign
         </button>
         {executable && (
@@ -353,7 +357,7 @@ function Executions({ sid, rev, act }: P) {
             rows={e.results.map((r: any) => [<b>{r.test_id}</b>, r.title, <Chip v={r.outcome} />, fmt(r.recorded_at), <code>{r.sha256.slice(0, 16)}</code>,
               <button className="link" onClick={() => setLog(log === r.id ? null : r.id)}>{log === r.id ? "Hide log" : "Show log"}</button>])}
           />
-          {e.results.filter((r: any) => r.id === log).map((r: any) => <pre key={r.id}>{r.actual}</pre>)}
+          {e.results.filter((r: any) => r.id === log).map((r: any) => <pre key={r.id}>{plain(r.actual)}</pre>)}
         </div>
       ))}
     </>
@@ -375,7 +379,7 @@ function Deviations({ sid, rev, act }: P) {
           <div className="panel" key={d.id}>
             <div className="row"><h2 style={{ margin: 0 }}>{d.test_id}: {d.title}</h2><Chip v={d.status} /><span className="muted small">opened {fmt(d.opened_at)}</span></div>
             <p>{d.description}</p>
-            <pre>{d.actual.slice(-1500)}</pre>
+            <pre>{plain(d.actual).slice(-1500)}</pre>
             {d.investigation && <><h3>Investigation (drafted by agent)</h3><p style={{ whiteSpace: "pre-wrap" }}>{d.investigation}</p></>}
             {fix?.original_snippet && (
               <>

@@ -26,7 +26,9 @@ def _run_one(repo_path: str, test_file: Path, log_file: Path) -> tuple[str, str]
     env = {**os.environ, "PYTHONPATH": str(Path(repo_path).resolve()), "PYTHONDONTWRITEBYTECODE": "1"}
     for secret in ("DATABASE_URL", "GEMINI_API_KEYS", "DEMO_PASSWORD"):
         env.pop(secret, None)   # generated test code never sees the tool's credentials
-    cmd = [sys.executable, "-m", "pytest", str(test_file), "-v", "--tb=short", "-p", "no:cacheprovider",
+    for colour in ("FORCE_COLOR", "PY_COLORS", "CLICOLOR_FORCE"):
+        env.pop(colour, None)   # evidence logs are plain text, without terminal colour codes
+    cmd = [sys.executable, "-m", "pytest", str(test_file), "-v", "--tb=short", "--color=no", "-p", "no:cacheprovider",
            "--rootdir", str(test_file.parent)]
     try:
         proc = subprocess.run(cmd, cwd=repo_path, env=env, capture_output=True, text=True, timeout=TIMEOUT_S)

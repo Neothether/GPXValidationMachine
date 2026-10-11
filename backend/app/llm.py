@@ -31,24 +31,49 @@ def model_for(tier: str) -> str:
     return os.environ.get("GEMINI_MODEL_PRO" if tier == "pro" else "GEMINI_MODEL_FAST", "gemini-flash-latest")
 
 
+class ModelUnavailable(RuntimeError):
+    """Every configured key and model refused the request."""
+
+
+# Free-tier keys have a small per-model daily quota, so a spent model falls through to the next one.
+DEFAULT_FALLBACKS = ("gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash,"
+                     "gemini-flash-lite-latest,gemini-3.5-flash-lite,gemini-2.5-flash-lite")
+_spent: set[tuple[int, str]] = set()    # (key index, model) pairs with no quota left today, or not offered
+
+
+def models_for(tier: str) -> list[str]:
+    fallbacks = os.environ.get("GEMINI_MODEL_FALLBACKS", DEFAULT_FALLBACKS).split(",")
+    return list(dict.fromkeys(m.strip() for m in [model_for(tier), *fallbacks] if m.strip()))
+
+
 def generate(agent: str, system: str, prompt: str, schema: type[BaseModel], tier: str = "pro"):
-    """Return (parsed, meta). `meta` is written to the audit trail by the caller."""
-    model = model_for(tier)
-    config = types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
-                                         response_schema=schema, temperature=0.1)
-    attempts = max(7, 2 * len(_clients or [1]))
-    for attempt in range(attempts):
-        client = _next_client()
-        try:
-            resp = client.models.generate_content(model=model, contents=prompt, config=config)
-            parsed = resp.parsed if resp.parsed is not None else schema.model_validate_json(resp.text)
-            meta = {"agent": agent, "model": model, "prompt_sha256": sha256(system + "\n" + prompt),
-                    "output_sha256": sha256(resp.text or "")}
-            return parsed, meta
-        except errors.APIError as e:
-            if e.code not in (429, 500, 503) or attempt == attempts - 1:
-                raise
-            time.sleep(min(3 * 2 ** attempt, 40))
+    """Return (parsed, meta). `meta` is written to the audit trail by the caller, and names the model used."""
+    request = types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
+                                          response_schema=schema, temperature=0.1)
+    _next_client()
+    reason = "no model was tried"
+    for model in models_for(tier):
+        for key, client in enumerate(_clients):
+            if (key, model) in _spent:
+                continue
+            for attempt in range(4):
+                try:
+                    resp = client.models.generate_content(model=model, contents=prompt, config=request)
+                    parsed = resp.parsed if resp.parsed is not None else schema.model_validate_json(resp.text)
+                    meta = {"agent": agent, "model": model, "prompt_sha256": sha256(system + "\n" + prompt),
+                            "output_sha256": sha256(resp.text or "")}
+                    return parsed, meta
+                except errors.APIError as e:
+                    reason = f"{model}: {e.code} {e.status}"
+                    if e.code == 404 or (e.code == 429 and "PerDay" in str(e)):
+                        _spent.add((key, model))
+                        break
+                    if e.code not in (429, 500, 503):
+                        raise
+                    time.sleep(min(3 * 2 ** attempt, 30))
+    raise ModelUnavailable(
+        f"Gemini could not serve this request with any configured key or model (last: {reason}). "
+        "Daily free-tier quota is probably spent: add another key to GEMINI_API_KEYS or enable billing, then restart.")
 
 
 def embed(texts: list[str]) -> list[list[float]]:

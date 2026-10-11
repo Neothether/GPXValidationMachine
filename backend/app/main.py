@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from . import agents, config, db, package, review, runner
+from . import agents, config, db, llm, package, review, runner
 from psycopg_pool import PoolTimeout
 
 app = FastAPI(title="The Validation Machine")
@@ -34,6 +34,11 @@ async def privilege_rejected(_, exc):
 async def configuration_error(_, exc):
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+@app.exception_handler(llm.ModelUnavailable)
+async def model_unavailable(_, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=429, content={"detail": str(exc)})   # the UI replaces 5xx text with a generic message
 
 @app.exception_handler(PoolTimeout)
 @app.exception_handler(psycopg.OperationalError)
