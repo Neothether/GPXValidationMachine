@@ -3,9 +3,8 @@ import os
 from pathlib import Path
 
 import psycopg
-from dotenv import find_dotenv, load_dotenv
+from . import config
 
-load_dotenv(find_dotenv(usecwd=True))
 
 SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
 
@@ -28,8 +27,8 @@ USERS = [
 
 
 def main():
-    password = os.environ["DEMO_PASSWORD"]
-    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+    password = config.required("DEMO_PASSWORD")
+    with psycopg.connect(config.required("DATABASE_URL"), autocommit=True, connect_timeout=10) as conn:
         for path in sorted(SQL_DIR.glob("*.sql")):
             print(f"applying {path.name}")
             conn.execute(path.read_text(encoding="utf-8"))
@@ -37,10 +36,9 @@ def main():
             conn.execute(
                 """insert into users (id, display_name, role, is_human, password_hash)
                    values (%s, %s, %s, %s, case when %s then crypt(%s, gen_salt('bf')) end)
-                   on conflict (id) do update set display_name = excluded.display_name, role = excluded.role,
-                       is_human = excluded.is_human, password_hash = excluded.password_hash""",
+                   on conflict (id) do nothing""",
                 (uid, name, role, human, human, password))
-        print(f"seeded {len(USERS)} identities")
+        print("Demo identities ensured; existing accounts and passwords were preserved.")
 
 
 if __name__ == "__main__":

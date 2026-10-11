@@ -4,14 +4,13 @@ import os
 import sys
 import time
 
-from dotenv import find_dotenv, load_dotenv
+from . import config
 from google import genai
 from google.genai import errors, types
 from pydantic import BaseModel
 
 from .db import sha256
 
-load_dotenv(find_dotenv(usecwd=True))
 
 _clients = None
 _cycle = None
@@ -20,14 +19,16 @@ _cycle = None
 def _next_client() -> genai.Client:
     global _clients, _cycle
     if _clients is None:
-        keys = [k.strip() for k in os.environ["GEMINI_API_KEYS"].split(",") if k.strip()]
+        keys = [k.strip() for k in config.required("GEMINI_API_KEYS").split(",") if k.strip()]
         _clients = [genai.Client(api_key=k) for k in keys]
         _cycle = itertools.cycle(_clients)
+    if not _clients:
+        raise config.ConfigurationError("Set at least one Gemini API key in .env, then restart the server.")
     return next(_cycle)
 
 
 def model_for(tier: str) -> str:
-    return os.environ["GEMINI_MODEL_PRO" if tier == "pro" else "GEMINI_MODEL_FAST"]
+    return os.environ.get("GEMINI_MODEL_PRO" if tier == "pro" else "GEMINI_MODEL_FAST", "gemini-flash-latest")
 
 
 def generate(agent: str, system: str, prompt: str, schema: type[BaseModel], tier: str = "pro"):

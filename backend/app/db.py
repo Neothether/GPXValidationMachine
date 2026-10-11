@@ -4,13 +4,12 @@ import json
 import os
 from contextlib import contextmanager
 
-from dotenv import find_dotenv, load_dotenv
+from . import config
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-load_dotenv(find_dotenv(usecwd=True))
 
 AGENT, RUNNER, APP = "vm_agent", "vm_runner", "vm_app"
 RUNNER_ID = "runner:pytest"
@@ -21,8 +20,8 @@ _pool = None
 def pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        _pool = ConnectionPool(os.environ["DATABASE_URL"], min_size=1, max_size=8,
-                               kwargs={"row_factory": dict_row}, open=True)
+        _pool = ConnectionPool(config.required("DATABASE_URL"), min_size=1, max_size=8, timeout=10,
+                               kwargs={"row_factory": dict_row, "connect_timeout": 10}, open=True)
     return _pool
 
 

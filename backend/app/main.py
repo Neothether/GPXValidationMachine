@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from . import agents, db, package, review, runner
+from . import agents, config, db, package, review, runner
+from psycopg_pool import PoolTimeout
 
 app = FastAPI(title="The Validation Machine")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
@@ -27,6 +28,25 @@ async def enforcement_rejected(_, exc):
 async def privilege_rejected(_, exc):
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=403, content={"detail": exc.diag.message_primary, "enforced_by": "database"})
+
+
+@app.exception_handler(config.ConfigurationError)
+async def configuration_error(_, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+@app.exception_handler(PoolTimeout)
+@app.exception_handler(psycopg.OperationalError)
+async def database_unavailable(_, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=503, content={"detail":
+        "Cannot connect to the database. Run python manage.py check from the repository, then restart the server."})
+
+@app.exception_handler(psycopg.errors.UndefinedTable)
+async def database_not_initialized(_, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=503, content={"detail":
+        "Database schema is missing. For a new database, run python manage.py init-db. For a shared database, ask its owner to check setup."})
 
 
 def _check_password(conn, user_id: str, password: str) -> dict | None:

@@ -7,10 +7,9 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import psycopg
-from dotenv import find_dotenv, load_dotenv
+from . import config
 from psycopg.types.json import Jsonb
 
-load_dotenv(find_dotenv(usecwd=True))
 
 
 def events(system_id: str) -> list[tuple]:

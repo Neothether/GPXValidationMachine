@@ -10,9 +10,9 @@ from pathlib import Path
 
 from psycopg.types.json import Jsonb
 
-from . import db, ingest
+from . import config, db, ingest
 
-EVIDENCE_DIR = Path(os.environ.get("EVIDENCE_DIR", "./evidence")).resolve()
+EVIDENCE_DIR = config.evidence_dir()
 TIMEOUT_S = 120
 
 

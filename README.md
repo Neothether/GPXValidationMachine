@@ -28,28 +28,72 @@ They live in the database (`backend/sql/002_enforcement.sql`), not in prompts or
   `time_bucket` anomaly detection, SQL views for live traceability and gap reports.
 - **FastAPI** backend, **React** frontend, **pytest** as the execution engine.
 
-## Run from a clean clone
+## Run from a clean clone (macOS, Windows, Linux)
 
-Requires Python 3.12+ and Node 20+.
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate            # macOS/Linux: source .venv/bin/activate
-pip install -r backend/requirements.txt
-copy .env.example .env            # then fill in DATABASE_URL, GEMINI_API_KEYS, DEMO_PASSWORD
-cd backend
-python -m app.setup               # schema, enforcement, views, demo identities
-pytest                            # enforcement tests
-uvicorn app.main:app --reload     # API on http://localhost:8000  (docs at /docs)
-```
+Requires Python 3.12+ and Node.js 20+ with npm. Clone the repository and open its folder in VS Code.
+The same commands work on every platform; use `python3` instead of `python` on macOS/Linux if needed,
+or `py` on Windows. No virtual-environment activation or absolute machine paths are needed.
 
 ```bash
-cd frontend
-npm install
-npm run dev                       # UI on http://localhost:5173
+python manage.py bootstrap
 ```
 
-Demo signers (`alex.author`, `quinn.qa`, `sam.owner`, `terry.tester`) all use `DEMO_PASSWORD` from `.env`.
+This creates `.venv`, installs backend dependencies and the locked frontend dependencies, and copies
+`.env.example` to `.env` only if `.env` does not already exist. Fill in that local file privately:
+
+- `DATABASE_URL`: a PostgreSQL connection with TimescaleDB, pgvector, and pgcrypto support (for example TigerData).
+- `GEMINI_API_KEYS`: your Gemini key, or comma-separated keys.
+- `DEMO_PASSWORD`: for a new database, choose the initial demo-account password. For an existing shared
+  database, get the existing account password from its owner. Editing this value does not reset accounts.
+
+For a **new database only**, initialize the schema and demo identities:
+
+```bash
+python manage.py init-db
+```
+
+This applies schema/trigger/view definitions and inserts missing identities. Existing passwords and
+accounts are preserved. Do not run schema setup casually against a shared database; coordinate with its owner.
+
+Check configuration, then start both servers in one terminal:
+
+```bash
+python manage.py check
+python manage.py dev
+```
+
+Open **http://127.0.0.1:5173**. Select `alex.author` and enter the demo-account password to sign in.
+Other demo accounts are `quinn.qa`, `sam.owner`, and `terry.tester`. API docs: http://127.0.0.1:8000/docs.
+Press Ctrl+C to stop both servers. After editing `.env`, stop and restart `dev` to load the changes.
+
+The check connects to the database and checks accounts without displaying secrets. It checks that a
+Gemini key is configured, but does not call Gemini. The app reports missing configuration or database
+connection problems with actionable messages instead of an unexplained login failure.
+
+### Sharing with teammates
+
+Commit source code, `manage.py`, and `.env.example`; never commit `.env`, `.venv`, `node_modules`, or evidence.
+Each teammate runs the commands above using their own local configuration. The demo loader discovers the
+bundled target relative to that teammate's checkout. Register a fresh system for each machine: existing
+system records contain paths on the machine where they were registered, so they cannot execute on a
+teammate's machine unchanged. A separate database per teammate avoids mixing demo records and local evidence.
+
+This is a portable local development setup, not a hosted production deployment. Sessions are in memory
+and generated tests execute locally; run trusted demo targets. A public deployment needs isolated test
+execution, durable shared evidence storage, and production authentication.
+
+### Verification
+
+From the repository root:
+
+```bash
+.venv/bin/python -m pytest -c backend/pytest.ini backend/tests/test_portability.py
+npm --prefix frontend run build
+```
+
+On Windows use `.venv\Scripts\python.exe` for the Python command. The portability checks do not
+connect to a database. Run the full `backend/tests` suite only against a configured disposable test database;
+its enforcement tests write test records.
 
 ## Demo target
 
