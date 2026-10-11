@@ -11,7 +11,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 
-AGENT, RUNNER, APP = "vm_agent", "vm_runner", "vm_app"
+AGENT, RUNNER, APP, TESTER = "vm_agent", "vm_runner", "vm_app", "vm_tester"
 RUNNER_ID = "runner:pytest"
 
 _pool = None

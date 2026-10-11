@@ -18,8 +18,9 @@ AUTHOR, QA, OWNER = "alex.author", "quinn.qa", "sam.owner"
 @pytest.fixture()
 def system():
     with db.tx(AUTHOR, db.APP) as conn:
-        return conn.execute("insert into systems (name, repo_path, intended_use) values ('enforcement-test', '.', 'test') "
-                            "returning *").fetchone()
+        # archived: test records are kept, but hidden from the inventory
+        return conn.execute("insert into systems (name, repo_path, intended_use, archived) "
+                            "values ('enforcement-test', '.', 'test', true) returning *").fetchone()
 
 
 def _artifact(system, kind, author="agent:spec"):
@@ -126,9 +127,67 @@ def test_tester_cannot_approve(system):
 
 
 def test_system_cannot_be_validated_without_approved_summary_report(system):
-    with pytest.raises(psycopg.errors.RaiseException, match="no approved Validation Summary Report"):
+    with pytest.raises(psycopg.errors.RaiseException, match="cannot be released: document_missing"):
         with db.tx(QA, db.APP) as conn:
             conn.execute("update systems set status = 'validated' where id = %s", (system["id"],))
+
+
+def test_only_qa_or_owner_can_release(system):
+    with pytest.raises(psycopg.errors.RaiseException, match="only Quality Assurance or the System Owner"):
+        with db.tx(AUTHOR, db.APP) as conn:
+            conn.execute("update systems set status = 'validated' where id = %s", (system["id"],))
+
+
+def test_summary_report_cannot_be_approved_against_open_blockers(system):
+    vsr = _artifact(system, "VSR", author="agent:vsr")
+    with pytest.raises(psycopg.errors.RaiseException, match="cannot be approved while release blockers remain"):
+        _sign(vsr, QA)
+
+
+def test_manual_result_needs_a_human_tester_and_the_tester_path(system):
+    proto = _artifact(system, "PQ", author="agent:test_author")
+    with db.tx("agent:test_author", db.AGENT) as conn:
+        tc = conn.execute("insert into test_cases (system_id, artifact_id, test_id, title, steps, expected, automation) "
+                          "values (%s, %s, 'PQ-001', 't', 's', 'e', 'manual') returning *", (system["id"], proto["id"])).fetchone()
+    _sign(proto, QA)
+    ex = _execute(proto, system)        # the runner identity, through the runner role
+    with pytest.raises(psycopg.errors.RaiseException, match="must be recorded by a human tester"):
+        with db.tx(db.RUNNER_ID, db.RUNNER) as conn:
+            ev = conn.execute("insert into evidence (execution_id, test_case_id, kind, path, sha256, captured_by) "
+                              "values (%s, %s, 'log', 'x', 'y', %s) returning *", (ex["id"], tc["id"], db.RUNNER_ID)).fetchone()
+            conn.execute("insert into step_results (execution_id, test_case_id, outcome, actual, evidence_id, recorded_by) "
+                         "values (%s, %s, 'pass', 'ok', %s, %s)", (ex["id"], tc["id"], ev["id"], db.RUNNER_ID))
+    ex2 = _execute(proto, system, role=db.TESTER, runner_id="terry.tester")
+    with db.tx("terry.tester", db.TESTER) as conn:
+        ev = conn.execute("insert into evidence (execution_id, test_case_id, kind, path, sha256, captured_by) "
+                          "values (%s, %s, 'observation', 'x', 'y', 'terry.tester') returning *", (ex2["id"], tc["id"])).fetchone()
+        conn.execute("insert into step_results (execution_id, test_case_id, outcome, actual, evidence_id, recorded_by) "
+                     "values (%s, %s, 'pass', 'observed', %s, 'terry.tester')", (ex2["id"], tc["id"], ev["id"]))
+
+
+def test_deviation_acceptance_needs_qa_and_a_justification(system):
+    proto = _artifact(system, "OQ", author="agent:test_author")
+    with db.tx("agent:test_author", db.AGENT) as conn:
+        tc = conn.execute("insert into test_cases (system_id, artifact_id, test_id, title, steps, expected) "
+                          "values (%s, %s, 'OQ-001', 't', 's', 'e') returning *", (system["id"], proto["id"])).fetchone()
+    _sign(proto, QA)
+    ex = _execute(proto, system)
+    with db.tx(db.RUNNER_ID, db.RUNNER) as conn:
+        ev = conn.execute("insert into evidence (execution_id, test_case_id, kind, path, sha256, captured_by) "
+                          "values (%s, %s, 'log', 'x', 'y', %s) returning *", (ex["id"], tc["id"], db.RUNNER_ID)).fetchone()
+        sr = conn.execute("insert into step_results (execution_id, test_case_id, outcome, actual, evidence_id, recorded_by) "
+                          "values (%s, %s, 'fail', 'boom', %s, %s) returning *", (ex["id"], tc["id"], ev["id"], db.RUNNER_ID)).fetchone()
+        dev = conn.execute("insert into deviations (system_id, step_result_id, test_case_id, description) "
+                           "values (%s, %s, %s, 'failed') returning *", (system["id"], sr["id"], tc["id"])).fetchone()
+    accept = "update deviations set status = 'accepted', resolution = %s, resolved_by = %s where id = %s"
+    with pytest.raises(psycopg.errors.RaiseException, match="only Quality Assurance can accept"):
+        with db.tx(OWNER, db.APP) as conn:
+            conn.execute(accept, ("Known upstream documentation discrepancy, no impact.", OWNER, dev["id"]))
+    with pytest.raises(psycopg.errors.RaiseException, match="written justification"):
+        with db.tx(QA, db.APP) as conn:
+            conn.execute(accept, ("ok", QA, dev["id"]))
+    with db.tx(QA, db.APP) as conn:
+        conn.execute(accept, ("Known upstream documentation discrepancy, no impact on intended use.", QA, dev["id"]))
 
 
 def test_audit_trail_is_append_only_and_chain_verifies(system):

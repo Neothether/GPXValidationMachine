@@ -52,6 +52,37 @@ class Review(BaseModel):
     controls: list[ControlStatus]
 
 
+def unresolved_references(conn, system_id) -> list[tuple[str, str, str, str]]:
+    """Requirements whose `path:line` citation points at a file or line that is not in the target.
+    This is how a claim drafted by an agent is checked against the material it says it came from."""
+    from pathlib import Path
+    s = conn.execute("select repo_path from systems where id = %s", (system_id,)).fetchone()
+    root = Path(s["repo_path"])
+    if not root.is_dir():
+        return []
+    lengths: dict[Path, int] = {}
+    out = []
+    for r in conn.execute(
+            """select r.req_id, r.level, r.source_ref from requirements r join v_current_artifacts a on a.id = r.artifact_id
+                where r.system_id = %s order by r.level, r.req_id""", (system_id,)):
+        ref = (r["source_ref"] or "").strip()
+        cited = re.findall(r"([\w./\\ ()-]+?\.\w+):(\d+)(?:-(\d+))?", ref)
+        if not cited:
+            if not re.search(r"intended[- ]use|sop", ref, re.I):
+                out.append((r["req_id"], r["level"], ref, "no file and line is cited"))
+            continue
+        for path, first, last in cited:
+            file = root / path.strip().replace("\\", "/")
+            if not file.is_file():
+                out.append((r["req_id"], r["level"], ref, f"file {path.strip()} not found in the target"))
+                continue
+            if file not in lengths:
+                lengths[file] = len(file.read_text(encoding="utf-8", errors="replace").splitlines())
+            if int(last or first) > lengths[file] or int(first) < 1:
+                out.append((r["req_id"], r["level"], ref, f"{path.strip()} has only {lengths[file]} lines"))
+    return out
+
+
 def _deterministic_findings(conn, system_id) -> list[Finding]:
     """Checks that need no judgement: chronology, signatures, evidence integrity, trace gaps."""
     out = []
@@ -77,6 +108,10 @@ def _deterministic_findings(conn, system_id) -> list[Finding]:
         out.append(Finding(severity="major", document=doc, location="signatures",
                            finding=f"Protocol was approved before the documents it verifies against were approved: {', '.join(sorted(specs))}.",
                            recommended_action="Confirm the protocol still matches the approved specifications and record the review."))
+    for req_id, level, ref, reason in unresolved_references(conn, system_id):
+        out.append(Finding(severity="major" if "not found" in reason else "minor", document=level, location=req_id,
+                           finding=f"Source reference `{ref}` does not resolve: {reason}.",
+                           recommended_action="Correct the reference or remove the requirement if nothing supports it."))
     for g in conn.execute("select * from v_gaps where system_id = %s", (system_id,)):
         sev = "major" if g["gap"] in ("untested_requirement", "failing_test", "not_executed") else "minor"
         out.append(Finding(severity=sev, document="Traceability matrix", location=g["ref"],
@@ -111,8 +146,38 @@ def _package_digest(conn, system_id) -> str:
     return "".join(parts)
 
 
+class ExternalReview(BaseModel):
+    findings: list[Finding]
+
+
+def review_external(system_id, package_text: str) -> dict:
+    """Review a validation package that was produced elsewhere (a vendor's, or a legacy one).
+    The findings are returned, not stored: they are about someone else's records, not this system's."""
+    actor = "agent:reviewer"
+    with db.read() as conn:
+        s = conn.execute("select intended_use from systems where id = %s", (system_id,)).fetchone()
+    rev, meta = llm.generate(actor, GROUND_RULES, f"""VALIDATION PACKAGE UNDER REVIEW (produced outside this tool):
+{package_text}
+
+TASK: review the package as a QA reviewer would, using only what it says. Check every one of these:
+- chronology: a protocol executed before it was approved; a summary report written or signed before testing finished;
+- signatures: missing approvals; a document approved by its own author;
+- results against evidence: a 'pass' whose recorded evidence shows the acceptance criteria were not met;
+- deviations: closed without a fix or a passing retest; failures with no deviation;
+- requirements: vague or untestable statements; requirements with no test;
+- risk: ratings with no real rationale, or all identical regardless of function;
+- consistency: any statement in one document that another document contradicts.
+`document` and `location` must name the document and the requirement, test or signature concerned.
+Report each distinct problem once. Report only problems you can point to.""", ExternalReview)
+    with db.tx(actor, db.AGENT) as conn:
+        db.audit(conn, "llm_call", "system", system_id, {**meta, "external_package_sha256": db.sha256(package_text)})
+    return {"findings": [f.model_dump() for f in rev.findings]}
+
+
 def run_review(system_id, external_package: str | None = None) -> dict:
-    """Review this system's package (or an externally supplied one) and map Part 11 / Annex 11 controls."""
+    """Review this system's package and map Part 11 / Annex 11 controls for the target."""
+    if external_package:
+        return review_external(system_id, external_package)
     actor = "agent:reviewer"
     with db.read() as conn:
         s = conn.execute("select * from systems where id = %s", (system_id,)).fetchone()
@@ -173,8 +238,11 @@ code evidence; use 'gap' when the intended use needs the control and nothing imp
 def draft_vsr(system_id) -> dict:
     """Built from records only, with no model call, so it cannot state anything the evidence does not show."""
     actor = "agent:vsr"
+    ingest.refresh_fingerprint(system_id, actor)
     with db.read() as conn:
         s = conn.execute("select * from systems where id = %s", (system_id,)).fetchone()
+        blockers = conn.execute("select * from vm_release_blockers(%s, false) where code <> 'summary_outdated'",
+                                (system_id,)).fetchall()
         arts = conn.execute("select * from v_current_artifacts where system_id = %s and kind <> 'VSR' order by created_at", (system_id,)).fetchall()
         trace = conn.execute("select * from v_trace where system_id = %s order by level, req_id, test_id", (system_id,)).fetchall()
         devs = conn.execute("select d.*, tc.test_id from deviations d join test_cases tc on tc.id = d.test_case_id "
@@ -183,13 +251,12 @@ def draft_vsr(system_id) -> dict:
         execs = conn.execute("select * from executions where system_id = %s order by started_at", (system_id,)).fetchall()
     tested = [t for t in trace if t["test_id"]]
     passed = [t for t in tested if t["outcome"] == "pass"]
-    open_devs = [d for d in devs if d["status"] == "open"]
-    unapproved = [a for a in arts if a["status"] != "approved"]
-    supports = not gaps and not open_devs and not unapproved and tested
+    supports = not blockers
     lines = [f"# Validation Summary Report: {s['name']}", "",
              "**DRAFT. This report has no standing until approved and e-signed by Quality Assurance and the System Owner.**", "",
              "## 1. System", f"- GxP impact: {s['gxp_impact']}", f"- GAMP 5 category: {s['gamp_category']}",
-             f"- Intended use: {s['intended_use']}", "",
+             f"- Intended use: {s['intended_use']}",
+             f"- Software version covered by this report (fingerprint): `{s['current_fingerprint'] or 'not recorded'}`", "",
              "## 2. Deliverables", "| Document | Version | Status | Author |", "|---|---|---|---|",
              *[f"| {a['kind']} | {a['version']} | {a['status']} | {a['author_id']} |" for a in arts], "",
              "## 3. Test execution", f"- Executions: {len(execs)}",
@@ -202,10 +269,11 @@ def draft_vsr(system_id) -> dict:
              "## 6. Traceability", "| Requirement | Risk | Test | Result |", "|---|---|---|---|",
              *[f"| {t['req_id']} | {t['risk_rating'] or ''} | {t['test_id'] or 'NONE'} | {t['outcome'] or 'not executed'} |" for t in trace], "",
              "## 7. Conclusion (draft, for QA decision)",
-             ("The records support a conclusion that the system is fit for its intended use: all traced tests pass, "
-              "all deviations are closed and all deliverables are approved." if supports else
-              f"The records do NOT yet support release: {len(gaps)} open gap(s), {len(open_devs)} open deviation(s), "
-              f"{len(unapproved)} unapproved deliverable(s)."), "",
+             ("The records support a conclusion that this software version is fit for its intended use: every test has a "
+              "passing result that applies to it (or an accepted deviation), deviations are closed, changes are assessed "
+              "and all deliverables are approved." if supports else
+              f"The records do NOT yet support release. {len(blockers)} blocker(s) remain:"),
+             *([] if supports else [f"- {b['code'].replace('_', ' ')} ({b['ref']}): {b['detail']}" for b in blockers]), "",
              "## 8. Approval", "| Role | Name | Meaning | Date/time |", "|---|---|---|---|",
              "| Quality Assurance | _pending e-signature_ | Approved | |", "| System Owner | _pending e-signature_ | Approved | |"]
     with db.tx(actor, db.AGENT) as conn:

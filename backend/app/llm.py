@@ -4,6 +4,8 @@ import os
 import sys
 import time
 
+import httpx
+
 from . import config
 from google import genai
 from google.genai import errors, types
@@ -70,6 +72,9 @@ def generate(agent: str, system: str, prompt: str, schema: type[BaseModel], tier
                         break
                     if e.code not in (429, 500, 503):
                         raise
+                    time.sleep(min(3 * 2 ** attempt, 30))
+                except httpx.TransportError as e:     # dropped connection or timeout: try again
+                    reason = f"{model}: {type(e).__name__}"
                     time.sleep(min(3 * 2 ** attempt, 30))
     raise ModelUnavailable(
         f"Gemini could not serve this request with any configured key or model (last: {reason}). "

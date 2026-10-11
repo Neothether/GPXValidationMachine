@@ -2,6 +2,18 @@
 
 Items are added during discussion. No code changes are made until the owner says so.
 
+## Status, 2026-10-11
+
+Built and verified: S1-S7 (access control); R1, R2, R4 (release tied to the software version, visible checklist,
+full change cycle as an automated test and once by hand on dataset 01); R3 (source references checked, reviewer
+scored against a flawed package: all 10 planted problems raised); R5 (periodic review, supplier assessment,
+inspection answers); B3 (deviation acceptance); C1 (summary at the top of the package); C6 partly (prints to PDF);
+manual test steps; audit trail import with CAPA; package snapshots; command-line harness, CI example and skill file.
+
+Still open: A2 (regulation text retrieval), A3 (per-document review checklist), B1 (second pass that challenges
+generated tests), B2 (coverage from documentation to requirements), C2-C5, C7, C8 (readability), S8 (per-system
+access), D2 (non-Python execution), company document templates, browser automation, generated PDF.
+
 ## Priority order (agreed in discussion with teammate's review)
 
 0. S1-S4: no data readable without sign-in (owner's request, before anything else).

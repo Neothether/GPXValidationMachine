@@ -39,7 +39,25 @@ def bundle(repo_path: str) -> str:
 
 
 def fingerprint(repo_path: str) -> str:
-    """Content hash of the target, recorded on every execution as the software version under test."""
+    """Content hash of the target, recorded on every execution as the software version under test.
+    Covers every file, including ones too large or of a type the agents do not read."""
     root = Path(repo_path)
-    h = [f"{p.relative_to(root).as_posix()}:{sha256(p.read_bytes())}" for p in repo_files(repo_path)]
-    return sha256("\n".join(h))
+    files = [p for p in sorted(root.rglob("*"))
+             if p.is_file() and not any(part in SKIP_DIRS for part in p.relative_to(root).parts)]
+    return sha256("\n".join(f"{p.relative_to(root).as_posix()}:{sha256(p.read_bytes())}" for p in files))
+
+
+def refresh_fingerprint(system_id, actor: str = "system") -> str | None:
+    """Record the fingerprint of the target as it is on disk now. A change of version lands in the audit trail."""
+    from . import db
+    with db.read() as conn:
+        s = conn.execute("select repo_path, current_fingerprint from systems where id = %s", (system_id,)).fetchone()
+    if not s:
+        return None
+    if not Path(s["repo_path"]).is_dir():       # registered on another machine: keep the last known version
+        return s["current_fingerprint"]
+    current = fingerprint(s["repo_path"])
+    if current != s["current_fingerprint"]:
+        with db.tx(actor, db.APP) as conn:
+            conn.execute("update systems set current_fingerprint = %s where id = %s", (current, system_id))
+    return current

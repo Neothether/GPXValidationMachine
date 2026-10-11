@@ -1,0 +1,39 @@
+# Example GitHub Actions workflow: keep a repository validated on every pull request.
+# Copy to .github/workflows/validation-gate.yml in the repository being validated, and set the secrets
+# DATABASE_URL and GEMINI_API_KEYS and the variable VM_SYSTEM_ID (printed by `vm.py validate`).
+#
+# What it does on each pull request:
+#   1. Assesses the impact of the diff against the approved requirements and their tests.
+#   2. Runs exactly the regression scope and records hashed evidence.
+#   3. Fails the check until this software version is released as validated.
+# It cannot approve the change record, sign the summary report or release: a person does that in the web app.
+name: validation-gate
+on:
+  pull_request:
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+      VM_SYSTEM_ID: ${{ vars.VM_SYSTEM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: Neothether/GPXValidationMachine
+          path: .validation-machine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r .validation-machine/backend/requirements.txt
+      - name: Assess the change and run its regression scope
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > change.diff
+          python .validation-machine/vm.py change --system "$VM_SYSTEM_ID" --diff change.diff \
+            --description "PR #${{ github.event.number }}: ${{ github.event.pull_request.title }}" --regress
+      - name: Release checklist (passes only when this version is released as validated)
+        run: python .validation-machine/vm.py check --system "$VM_SYSTEM_ID"

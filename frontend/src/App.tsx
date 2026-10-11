@@ -7,8 +7,8 @@ type Act = (label: string, fn: () => Promise<unknown>, done?: string) => Promise
 type Banner = { kind: "ok" | "bad"; title: string; text: string } | null;
 type P = { sid: string; rev: number; act: Act };
 const Session = createContext({ signedIn: false, busy: "" });
-const TABS = ["Pipeline", "Traceability", "Execution", "Deviations", "Review", "Change control", "Audit trail"] as const;
-const TAB_ICONS = ["layers", "link", "play", "alert", "check", "change", "clock"];
+const TABS = ["Pipeline", "Traceability", "Execution", "Deviations", "Review", "Change control", "Release", "Inspection", "Audit trail"] as const;
+const TAB_ICONS = ["layers", "link", "play", "alert", "check", "change", "shield", "search", "clock"];
 const TAB_DESCRIPTIONS: Record<string, string> = {
   Pipeline: "Move from intended use to a complete validation package.",
   Traceability: "Connect requirements, risks, tests, and supporting evidence.",
@@ -16,6 +16,8 @@ const TAB_DESCRIPTIONS: Record<string, string> = {
   Deviations: "Investigate failures, review fixes, and track resolution.",
   Review: "Review your validation package and its supporting controls.",
   "Change control": "Understand change impact and target your regression testing.",
+  Release: "See exactly what stands between this software version and release.",
+  Inspection: "Answer inspection questions from recorded evidence, and keep the validated state under review.",
   "Audit trail": "Explore recorded activity across the workspace.",
 };
 function Icon({ name, size = 20 }: { name: string; size?: number }) {
@@ -75,8 +77,11 @@ function Table({ cols, rows, empty = "Nothing recorded yet." }: { cols: string[]
 export default function App() {
   const [user, setUser] = useState<any>(null);
   const [sessionChecked, setSessionChecked] = useState(false);
-  const [sid, setSid] = useState<string | null>(null);
-  const [tab, setTab] = useState<(typeof TABS)[number]>("Pipeline");
+  // The open system and tab live in the address bar, so a reload or a shared link returns to the same place.
+  const [place] = useState(() => new URLSearchParams(location.hash.slice(1)));
+  const [sid, setSid] = useState<string | null>(place.get("system"));
+  const [tab, setTab] = useState<(typeof TABS)[number]>(TABS.find((t) => t === place.get("tab")) ?? "Pipeline");
+  useEffect(() => { history.replaceState(null, "", sid ? `#system=${sid}&tab=${encodeURIComponent(tab)}` : location.pathname); }, [sid, tab]);
   const [banner, setBanner] = useState<Banner>(null);
   const [busy, setBusy] = useState("");
   const [rev, setRev] = useState(0);
@@ -132,6 +137,8 @@ export default function App() {
               {tab === "Deviations" && <Deviations sid={sid} rev={rev} act={act}/>}
               {tab === "Review" && <Review sid={sid} rev={rev} act={act}/>}
               {tab === "Change control" && <Changes sid={sid} rev={rev} act={act}/>}
+              {tab === "Release" && <ReleasePanel sid={sid} rev={rev} act={act}/>}
+              {tab === "Inspection" && <Inspection sid={sid} rev={rev} act={act}/>}
               {tab === "Audit trail" && <Audit rev={rev} act={act}/>}
             </div>
           </>}
@@ -139,7 +146,7 @@ export default function App() {
         </main>
       </div>
     </div>
-    {authOpen && <AuthDialog user={user} close={() => setAuthOpen(false)} signIn={(u) => { setUser(u); setSid(null); setAuthOpen(false); setRev((v) => v + 1); }} signOut={async () => { await api("/logout", {}).catch(() => undefined); setUser(null); setSid(null); setAuthOpen(false); }}/>}
+    {authOpen && <AuthDialog user={user} close={() => setAuthOpen(false)} signIn={(u) => { setUser(u); setAuthOpen(false); setRev((v) => v + 1); }} signOut={async () => { await api("/logout", {}).catch(() => undefined); setUser(null); setSid(null); setAuthOpen(false); }}/>}
   </Session.Provider>;
 }
 
@@ -212,7 +219,7 @@ function Inventory({ rev, act, open, signedIn }: { rev: number; act: Act; open: 
       <div className="table-toolbar"><div className="search-field"><Icon name="search" size={18}/><input aria-label="Search systems" placeholder="Search systems or intended use…" value={search} onChange={(e) => setSearch(e.target.value)}/></div><select aria-label="Filter systems by status" value={status} onChange={(e) => setStatus(e.target.value)}><option value="all">All statuses</option>{Array.from(new Set(systems.map((s) => s.status))).map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}</select></div>
       {pending(resource) ? <LoadState resources={[resource]}/> : systems.length === 0 ? <div className="empty-state spacious"><span className="empty-icon"><Icon name="layers" size={30}/></span><h3>Your first validation starts here</h3><p>Register a system and describe its intended use to get started.</p><button className="primary" onClick={() => setRegister(true)}><Icon name="plus" size={16}/>Register your first system</button></div> : <Table cols={["System", "Status", "Classification", "Needs attention", "Last executed", ""]} rows={visible.map((s) => [
         <div className="system-cell"><span className="system-icon"><Icon name="layers"/></span><div><button className="system-name" onClick={() => open(s.id)}>{s.name}</button><span className="system-description">{s.intended_use}</span></div></div>,
-        <Chip v={s.status}/>, <div className="classification">{s.gxp_impact ? `${s.gxp_impact} GxP impact` : "Not assessed"}<small>{s.gamp_category ? `GAMP category ${s.gamp_category}` : "Classification pending"}</small></div>,
+        <><Chip v={s.status}/>{s.drift && <span className="chip bad" title="The files have changed since the last release">software changed</span>}</>, <div className="classification">{s.gxp_impact ? `${s.gxp_impact} GxP impact` : "Not assessed"}<small>{s.gamp_category ? `GAMP category ${s.gamp_category}` : "Classification pending"}</small></div>,
         <div className="attention-cell"><span className={s.open_deviations ? "attention" : "muted"}>{s.open_deviations} deviations</span><span className={s.open_gaps ? "attention" : "muted"}>{s.open_gaps} gaps</span></div>,
         <span className="date-cell">{s.last_executed ? fmt(s.last_executed) : "Not executed yet"}</span>,
         <button className="open-button" aria-label={`Open ${s.name}`} onClick={() => open(s.id)}>Open<Icon name="arrow" size={16}/></button>,
@@ -247,7 +254,7 @@ function SystemHeader({ sid, rev, act }: P) {
   if (pending(resource)) return <LoadState resources={[resource]}/>;
   const s = resource.data;
   if (!s) return null;
-  return <section className="panel system-summary"><div className="system-summary-main"><span className="system-icon large"><Icon name="layers" size={25}/></span><div><div className="row"><h2>{s.name}</h2><Chip v={s.status}/></div><p className="muted">{s.intended_use}</p><div className="system-meta"><span>GxP impact <b>{s.gxp_impact ?? "Not assessed"}</b></span><span>GAMP category <b>{s.gamp_category ?? "Pending"}</b></span></div></div></div><div className="system-actions"><a className="button" href={`/api/systems/${sid}/package`} target="_blank" rel="noreferrer"><Icon name="doc" size={16}/>Validation package</a><button disabled={!signedIn || !!busy || s.status === "validated"} onClick={() => act("Updating status", () => api(`/systems/${sid}/status/validated`, {}), "System released as validated")}>{s.status === "validated" ? "Released as validated" : "Release as validated"}</button></div></section>;
+  return <section className="panel system-summary"><div className="system-summary-main"><span className="system-icon large"><Icon name="layers" size={25}/></span><div><div className="row"><h2>{s.name}</h2><Chip v={s.status}/></div><p className="muted">{s.intended_use}</p><div className="system-meta"><span>GxP impact <b>{s.gxp_impact ?? "Not assessed"}</b></span><span>GAMP category <b>{s.gamp_category ?? "Pending"}</b></span></div></div></div><div className="system-actions"><a className="button" href={`/api/systems/${sid}/package`} target="_blank" rel="noreferrer"><Icon name="doc" size={16}/>Validation package</a><button disabled={!signedIn || !!busy || s.status === "validated"} onClick={() => act("Updating status", () => api(`/systems/${sid}/release`, {}), "System released as validated")}>{s.status === "validated" ? "Released as validated" : "Release as validated"}</button></div></section>;
 }
 const STAGES = [
   ["plan", "Plan & classify", "Define intended use, GxP impact, and the validation approach.", ["VP"]],
@@ -354,6 +361,12 @@ function Trace({ sid, rev }: P) {
         />
       </div>
       <div className="panel">
+        <h2>Tests traced back to requirements</h2>
+        <Table cols={["Test", "Protocol", "Result", "Verifies"]}
+               rows={Array.from(new Set(rows.filter((t) => t.test_id).map((t) => t.test_id))).sort().map((id) => { const hits = rows.filter((t) => t.test_id === id); return [<b>{id}</b>, <>{hits[0].protocol_kind} v{hits[0].protocol_version}</>, <Chip v={hits[0].outcome ?? "not_executed"}/>, hits.map((t) => t.req_id).join(", ")]; })}
+               empty="No tests drafted yet." />
+      </div>
+      <div className="panel">
         <h2>Risk assessment</h2>
         <Table
           cols={["Function", "Severity", "Probability", "Detectability", "Rating", "Test depth", "Rationale", "Basis"]}
@@ -370,15 +383,16 @@ function Executions({ sid, rev, act }: P) {
   const [log, setLog] = useState<string | null>(null);
   const [verified, setVerified] = useState<Record<string, string>>({});
   if (pending(resource)) return <LoadState resources={[resource]}/>;
-  if (!execs.length) return <div className="panel"><p className="muted">No executions yet. Approve a protocol, then execute it from the Pipeline tab.</p></div>;
   return (
     <>
+      <ManualTests sid={sid} rev={rev} act={act}/>
+      {!execs.length && <div className="panel"><p className="muted">No executions yet. Approve a protocol, then execute it from the Pipeline tab.</p></div>}
       {execs.map((e) => (
         <div className="panel" key={e.id}>
           <div className="row">
             <h2 style={{ margin: 0 }}>{e.kind} v{e.version} {e.retest_of && <span className="chip">retest</span>}</h2>
             <span className="muted small">
-              {fmt(e.started_at)} | by <code>{e.runner_id}</code> | software <code>{e.target_fingerprint.slice(0, 16)}</code> | Python {e.environment.python} on {e.environment.platform}
+              {fmt(e.started_at)} | by <code>{e.runner_id}</code> | software <code>{e.target_fingerprint.slice(0, 16)}</code> | {e.environment.manual ? "manual step" : `Python ${e.environment.python}`} on {e.environment.platform}
             </span>
             <span style={{ flex: 1 }} />
             {verified[e.id] && <span className={`chip ${verified[e.id] === "intact" ? "ok" : "bad"}`}>evidence {verified[e.id]}</span>}
@@ -443,7 +457,8 @@ function Deviations({ sid, rev, act }: P) {
                   </button>
                 </div>
               </>
-            ) : <p><b>Resolution:</b> {d.resolution} <span className="muted small">by {d.resolved_by}, {fmt(d.resolved_at)}</span></p>}
+            ) : <p><b>{d.status === "accepted" ? "Accepted with justification" : "Resolution"}:</b> {d.resolution} <span className="muted small">by {d.resolved_by}, {fmt(d.resolved_at)}</span></p>}
+            {d.status === "open" && <AcceptDeviation id={d.id} act={act}/>}
           </div>
         );
       })}
@@ -455,6 +470,7 @@ function Review({ sid, rev, act }: P) {
   const resource = useLoad<any>(`/systems/${sid}/findings`, rev);
   const data = resource.data;
   const [ext, setExt] = useState("");
+  const [extFindings, setExtFindings] = useState<any[] | null>(null);
   if (pending(resource)) return <LoadState resources={[resource]}/>;
   return (
     <>
@@ -464,8 +480,8 @@ function Review({ sid, rev, act }: P) {
           <button className="primary" onClick={() => act("Reviewing package", () => api(`/systems/${sid}/run/review`, {}))}>Review this package</button>
         </div>
         <h3>Findings</h3>
-        <Table cols={["Severity", "Document", "Location", "Finding", "Recommended action"]}
-               rows={(data?.findings ?? []).map((f: any) => [<Chip v={f.severity} />, f.document, f.location, f.finding, f.recommended_action])}
+        <Table cols={["Severity", "Document", "Location", "Finding", "Recommended action", "Disposition (QA)"]}
+               rows={(data?.findings ?? []).map((f: any) => [<Chip v={f.severity} />, f.document, f.location, f.finding, f.recommended_action, <FindingDisposition f={f} act={act}/>])}
                empty="No findings recorded. Run the review." />
       </div>
       <div className="panel">
@@ -478,11 +494,20 @@ function Review({ sid, rev, act }: P) {
         <Table cols={["Anomaly", "Actor", "When", "Detail"]}
                rows={(data?.audit_anomalies ?? []).map((a: any) => [<Chip v={a.anomaly} />, a.actor, fmt(a.at), a.detail])}
                empty="No target audit trail loaded, or no anomalies." />
+        <AuditTrailTools sid={sid} events={data?.audit_events ?? 0} act={act}/>
+      </div>
+      <SupplierPanel sid={sid} act={act}/>
+      <div className="panel">
+        <h2>Review records</h2>
+        <Table cols={["Record", "Version", "Status", "Created", ""]}
+               rows={(data?.records ?? []).map((r: any) => [r.title, `v${r.version}`, <Chip v={r.status}/>, fmt(r.created_at), <DocLink aid={r.id} label="Review and sign" rev={rev} act={act}/>])}
+               empty="No audit trail review, periodic review or supplier assessment yet." />
       </div>
       <div className="panel">
         <h2>Review an external validation package</h2>
         <textarea placeholder="Paste a vendor or legacy validation package" value={ext} onChange={(e) => setExt(e.target.value)} />
-        <p><button disabled={!ext} onClick={() => act("Reviewing external package", () => api(`/systems/${sid}/review-external`, { text: ext }))}>Review pasted package</button></p>
+        <p><button disabled={!ext} onClick={() => act("Reviewing external package", async () => setExtFindings((await api(`/systems/${sid}/review-external`, { text: ext })).findings))}>Review pasted package</button></p>
+        {extFindings && <Table cols={["Severity", "Document", "Location", "Finding", "Recommended action"]} rows={extFindings.map((f: any) => [<Chip v={f.severity} />, f.document, f.location, f.finding, f.recommended_action])} empty="No problems found in the pasted package." />}
       </div>
     </>
   );
@@ -522,10 +547,15 @@ function Changes({ sid, rev, act }: P) {
             <Chip v={c.impact?.risk_of_change} />
             <span className="muted small">{fmt(c.created_at)}</span>
             <span style={{ flex: 1 }} />
-            <button disabled={!c.impact?.regression_scope?.length}
-                    onClick={() => act("Running regression", () => api(`/changes/${c.id}/regress`, {}), "Regression executed; see Execution")}>
-              Run regression scope
-            </button>
+            {c.withdrawn_at ? <span className="chip">withdrawn</span> : <>
+              <span className={`chip ${c.regressed_at ? "ok" : "warn"}`}>{c.regressed_at ? "regressed" : "not regressed"}</span>
+              <span className={`chip ${tone(c.record_status)}`}>record {c.record_status ?? "missing"}</span>
+              {c.artifact_id && <DocLink aid={c.artifact_id} label="Review and sign record" rev={rev} act={act}/>}
+              <button disabled={!!c.regressed_at} onClick={() => act("Running regression", () => api(`/changes/${c.id}/regress`, {}), "Regression recorded; see Execution")}>
+                {c.impact?.regression_scope?.length ? "Run regression scope" : "Record: no retest needed"}
+              </button>
+              <button className="link" disabled={!!c.regressed_at} onClick={() => act("Withdrawing change", () => api(`/changes/${c.id}/withdraw`, {}), "Change withdrawn")}>Withdraw</button>
+            </>}
           </div>
           <p>{c.impact?.summary}</p>
           <h3>Impacted requirements</h3>
@@ -559,4 +589,159 @@ function Audit({ rev, act }: { rev: number; act: Act }) {
       />
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Lifecycle screens: release decision, manual test steps, review tools, inspection readiness.
+// ---------------------------------------------------------------------------------------------------
+function DocLink({ aid, label, rev, act }: { aid: string; label: string; rev: number; act: Act }) {
+  const [open, setOpen] = useState(false);
+  return <><button className="link" onClick={() => setOpen(true)}>{label}</button>{open && <Modal title="Document review" close={() => setOpen(false)}><Document aid={aid} rev={rev} act={act}/></Modal>}</>;
+}
+
+function ReleasePanel({ sid, rev, act }: P) {
+  const check = useLoad<any>(`/systems/${sid}/release-check`, rev);
+  const snaps = useLoad<any[]>(`/systems/${sid}/snapshots`, rev);
+  const { busy } = useContext(Session);
+  const [label, setLabel] = useState("");
+  if (pending(check, snaps)) return <LoadState resources={[check, snaps]}/>;
+  const c = check.data;
+  const open = c.checklist.filter((r: any) => !r.ok).length;
+  return <>
+    <section className="panel">
+      <div className="section-heading"><div><h2>Release checklist <span className={`chip ${c.ready ? "ok" : "bad"}`}>{c.ready ? "ready to release" : `${open} of ${c.checklist.length} checks open`}</span></h2>
+        <p>Judged against the software as it is on disk now. Fingerprint <code>{(c.fingerprint ?? "not recorded").slice(0, 16)}</code>{!c.repo_available && " (the repository is not reachable from this server, so this is the last known version)"}</p></div>
+        <button className="primary" disabled={!!busy || !c.ready || c.status === "validated"} onClick={() => act("Releasing", () => api(`/systems/${sid}/release`, {}), "System released as validated")}>{c.status === "validated" ? "Released as validated" : "Release as validated"}</button></div>
+      {c.drift && <p className="form-error" role="alert">The software has changed since the last release, so that release no longer covers it. Register the change under Change control.</p>}
+      <div className="checklist">{c.checklist.map((row: any) => <div key={row.label} className={`check-row ${row.ok ? "ok" : "bad"}`}>
+        <span className="check-mark"><Icon name={row.ok ? "check" : "alert"} size={18}/></span>
+        <div><b>{row.label}</b>{row.items.map((b: any, i: number) => <p key={i} className="small"><code>{b.ref}</code> {b.detail}</p>)}</div>
+      </div>)}</div>
+      <p className="muted small">The database applies the same checks when release is requested, and only Quality Assurance or the System Owner can release.</p>
+    </section>
+    <section className="panel">
+      <h2>Release history</h2>
+      <Table cols={["Released", "By", "Software fingerprint", "Summary report"]} rows={c.releases.map((r: any) => [fmt(r.released_at), r.display_name, <code>{r.fingerprint.slice(0, 16)}</code>, `VSR v${r.vsr_version}`])} empty="This system has not been released yet."/>
+    </section>
+    <section className="panel">
+      <div className="section-heading"><div><h2>Package snapshots</h2><p>A frozen copy of the whole validation package for one software version. One is saved automatically at each release.</p></div></div>
+      <Table cols={["Saved", "Label", "Software fingerprint", "Package SHA-256", ""]} rows={(snaps.data ?? []).map((s) => [fmt(s.created_at), s.label, <code>{(s.fingerprint ?? "").slice(0, 16)}</code>, <code>{s.sha256.slice(0, 16)}</code>, <a href={`/api/snapshots/${s.id}`} target="_blank" rel="noreferrer">Open</a>])} empty="No snapshot saved yet."/>
+      <div className="row" style={{ marginTop: 12 }}><input aria-label="Snapshot label" style={{ flex: 1 }} placeholder="Label, for example: before the Q4 upgrade" value={label} onChange={(e) => setLabel(e.target.value)}/>
+        <button disabled={!!busy || !label.trim()} onClick={() => act("Saving snapshot", async () => { await api(`/systems/${sid}/snapshots`, { label }); setLabel(""); }, "Snapshot saved")}>Save snapshot now</button></div>
+    </section>
+  </>;
+}
+
+function ManualTests({ sid, rev, act }: P) {
+  const resource = useLoad<any[]>(`/systems/${sid}/manual-tests`, rev);
+  const { busy } = useContext(Session);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [f, setF] = useState({ outcome: "pass", actual: "", password: "" });
+  const [file, setFile] = useState<File | null>(null);
+  const tests = resource.data ?? [];
+  if (pending(resource) || !tests.length) return null;
+  const record = (id: string) => act("Recording manual result", async () => {
+    const body: any = { ...f };
+    setF({ outcome: "pass", actual: "", password: "" });
+    if (file) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = "";
+      bytes.forEach((b) => { binary += String.fromCharCode(b); });
+      body.attachment_name = file.name;
+      body.attachment_base64 = btoa(binary);
+    }
+    await api(`/test-cases/${id}/manual-result`, body);
+    setFile(null); setOpenId(null);
+  }, "Manual result recorded and signed");
+  return <div className="panel">
+    <h2>Manual test steps <span className="count">{tests.length}</span></h2>
+    <p className="muted">Steps a person must perform. A tester records what they observed, attaches evidence, and signs by re-entering their password.</p>
+    <Table cols={["Test", "Title", "Protocol", "Latest result", ""]} rows={tests.map((t) => [<b>{t.test_id}</b>, t.title, <>{t.kind} v{t.version} <Chip v={t.protocol_status}/></>, t.outcome ? <><Chip v={t.outcome}/> <span className="muted small">{t.recorded_by}, {fmt(t.recorded_at)}</span></> : <Chip v="not_executed"/>, <button onClick={() => setOpenId(openId === t.id ? null : t.id)}>{openId === t.id ? "Close" : "Perform"}</button>])}/>
+    {tests.filter((t) => t.id === openId).map((t) => <div key={t.id}>
+      <h3>{t.test_id}: procedure</h3><p style={{ whiteSpace: "pre-wrap" }}>{t.steps}</p>
+      <h3>Acceptance criteria</h3><p style={{ whiteSpace: "pre-wrap" }}>{t.expected}</p>
+      <label htmlFor="manual-actual">Observed result</label><textarea id="manual-actual" value={f.actual} onChange={(e) => setF({ ...f, actual: e.target.value })} placeholder="What you did and what you saw"/>
+      <div className="row" style={{ marginTop: 10 }}>
+        <select aria-label="Outcome" value={f.outcome} onChange={(e) => setF({ ...f, outcome: e.target.value })}><option value="pass">Pass</option><option value="fail">Fail</option></select>
+        <input aria-label="Evidence attachment" type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)}/>
+        <input aria-label="Password to sign the result" type="password" autoComplete="current-password" placeholder="Re-enter password to sign" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })}/>
+        <button className="primary" disabled={!!busy || f.actual.trim().length < 10 || !f.password} onClick={() => record(t.id)}>Record and sign</button>
+      </div>
+      <p className="muted small">Only an account with the Tester role can record a manual step, and only for an approved protocol.</p>
+    </div>)}
+  </div>;
+}
+
+function AcceptDeviation({ id, act }: { id: string; act: Act }) {
+  const [f, setF] = useState({ justification: "", password: "" });
+  return <>
+    <label>Accept without a passing retest (Quality Assurance only)</label>
+    <div className="row">
+      <input aria-label="Justification" style={{ flex: 1 }} placeholder="Written justification, at least 30 characters" value={f.justification} onChange={(e) => setF({ ...f, justification: e.target.value })}/>
+      <input aria-label="Password to sign the acceptance" type="password" autoComplete="current-password" placeholder="Re-enter password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })}/>
+      <button disabled={f.justification.trim().length < 30 || !f.password} onClick={() => act("Accepting deviation", async () => { const body = f; setF({ justification: "", password: "" }); await api(`/deviations/${id}/accept`, body); }, "Deviation accepted with justification")}>Accept deviation</button>
+    </div>
+  </>;
+}
+
+function FindingDisposition({ f, act }: { f: any; act: Act }) {
+  const [note, setNote] = useState("");
+  if (f.disposition) return <span><Chip v={f.disposition === "addressed" ? "resolved" : "accepted"}/> <span className="muted small">{f.disposition_note} ({f.disposed_by})</span></span>;
+  const send = (disposition: string) => act("Recording disposition", () => api(`/findings/${f.id}/disposition`, { disposition, note }), "Disposition recorded");
+  return <div className="row"><input aria-label="Disposition note" placeholder="Note, at least 15 characters" value={note} onChange={(e) => setNote(e.target.value)}/>
+    <button disabled={note.trim().length < 15} onClick={() => send("addressed")}>Addressed</button>
+    <button disabled={note.trim().length < 15} onClick={() => send("accepted")}>Accept</button></div>;
+}
+
+function AuditTrailTools({ sid, events, act }: { sid: string; events: number; act: Act }) {
+  const [csv, setCsv] = useState("");
+  return <>
+    <p className="muted small">{events} audit trail events loaded for this system.</p>
+    <label htmlFor="audit-csv">Load an audit trail (CSV with columns recorded_at, event_time, actor, action, record_id, author)</label>
+    <textarea id="audit-csv" value={csv} onChange={(e) => setCsv(e.target.value)} placeholder={"recorded_at,event_time,actor,action,record_id,author\n2026-09-30T10:15:00Z,2026-09-28T09:00:00Z,dm.osei,update,reading-2231,"}/>
+    <div className="row" style={{ marginTop: 10 }}>
+      <button disabled={!csv.trim()} onClick={() => act("Loading audit trail", async () => { await api(`/systems/${sid}/audit-trail`, { csv }); setCsv(""); }, "Audit trail loaded")}>Load CSV</button>
+      <button onClick={() => act("Loading synthetic audit trail", () => api(`/systems/${sid}/audit-trail/demo`, {}), "Synthetic audit trail loaded")}>Load synthetic example</button>
+      <button className="primary" disabled={!events} onClick={() => act("Drafting audit trail review", () => api(`/systems/${sid}/audit-trail/review`, {}), "Audit trail review with CAPA drafted; see Review records")}>Draft audit trail review with CAPA</button>
+    </div>
+  </>;
+}
+
+function SupplierPanel({ sid, act }: { sid: string; act: Act }) {
+  const [f, setF] = useState({ vendor: "", documents: "" });
+  return <div className="panel">
+    <h2>Supplier assessment</h2>
+    <p className="muted">Answers a standard supplier questionnaire from the vendor's own documents, citing evidence, and recommends how far their testing can be relied on. Leave the documents empty to use the documentation inside the target repository.</p>
+    <div className="row"><input aria-label="Supplier name" style={{ flex: 1 }} placeholder="Supplier name" value={f.vendor} onChange={(e) => setF({ ...f, vendor: e.target.value })}/></div>
+    <label htmlFor="vendor-docs">Vendor documents <span className="muted">(optional)</span></label>
+    <textarea id="vendor-docs" value={f.documents} onChange={(e) => setF({ ...f, documents: e.target.value })} placeholder="Paste quality manual excerpts, release notes, test summaries"/>
+    <p><button disabled={!f.vendor.trim()} onClick={() => act("Drafting supplier assessment", () => api(`/systems/${sid}/supplier-assessment`, f), "Supplier assessment drafted; see Review records")}>Draft supplier assessment</button></p>
+  </div>;
+}
+
+function Inspection({ sid, rev, act }: P) {
+  const resource = useLoad<any[]>(`/systems/${sid}/inspection`, rev);
+  const records = useLoad<any>(`/systems/${sid}/findings`, rev);
+  const [question, setQuestion] = useState("");
+  const [asked, setAsked] = useState<any[]>([]);
+  if (pending(resource, records)) return <LoadState resources={[resource, records]}/>;
+  const reviews = (records.data?.records ?? []).filter((r: any) => r.kind === "PR");
+  return <>
+    <section className="panel">
+      <div className="section-heading"><div><h2>Inspection readiness</h2><p>Each answer is assembled from the records at this moment and names the records it rests on.</p></div></div>
+      {(resource.data ?? []).map((a, i) => <div className="qa" key={i}><h3>{a.question}</h3><p>{a.answer}</p><p className="muted small">Records: {a.citations.join("; ")}</p></div>)}
+    </section>
+    <section className="panel">
+      <h2>Ask a question</h2>
+      <p className="muted">Answered by an agent from the records only. If the records do not contain the answer, it says so.</p>
+      <div className="row"><input aria-label="Inspection question" style={{ flex: 1 }} placeholder="For example: who approved the OQ protocol and was it before execution?" value={question} onChange={(e) => setQuestion(e.target.value)}/>
+        <button className="primary" disabled={question.trim().length < 8} onClick={() => act("Answering from records", async () => { const a = await api(`/systems/${sid}/inspection/ask`, { question }); setAsked((list) => [{ question, ...a }, ...list]); setQuestion(""); })}>Ask</button></div>
+      {asked.map((a, i) => <div className="qa" key={i}><h3>{a.question}</h3><p>{a.answer}</p><p className="muted small">{a.found_in_records ? `Records: ${a.citations.join("; ")}` : "Not found in the records."}</p></div>)}
+    </section>
+    <section className="panel">
+      <div className="section-heading"><div><h2>Periodic review</h2><p>Confirms the system is still in a validated state: changes, deviations, test status, audit trail and access, with findings, owners and due dates. Signed by Quality Assurance and the System Owner.</p></div>
+        <button className="primary" onClick={() => act("Drafting periodic review", () => api(`/systems/${sid}/periodic-review`, {}), "Periodic review drafted")}>Draft periodic review</button></div>
+      <Table cols={["Record", "Version", "Status", "Created", ""]} rows={reviews.map((r: any) => [r.title, `v${r.version}`, <Chip v={r.status}/>, fmt(r.created_at), <DocLink aid={r.id} label="Review and sign" rev={rev} act={act}/>])} empty="No periodic review on record."/>
+    </section>
+  </>;
 }

@@ -220,6 +220,7 @@ class TestCase(BaseModel):
     requirement_ids: list[str]
     steps: str
     expected: str
+    automation: Literal["pytest", "manual"]
     code: str
 
 
@@ -257,7 +258,12 @@ TASK: Write the IQ, OQ and PQ test protocols as automated pytest tests.
   pytest, and the target's own packages.
 - Derive expected results from the REQUIREMENT, never from what the code currently does. If the code looks
   wrong against the requirement, still assert the requirement: finding that is the purpose of the test.
-- Do not mock the function under test. Do not use skip or xfail.""", Protocols)
+- Do not mock the function under test. Do not use skip or xfail.
+- `automation`: 'pytest' whenever the behaviour can be checked from Python against this repository
+  (calculations, APIs, data and configuration files, environment). Use 'manual' ONLY when it cannot: the
+  code is in a language Python cannot import and no data file shows the behaviour, or a person must look at
+  a screen. For a manual test leave `code` empty and write `steps` so a tester can follow them exactly,
+  saying what to record as evidence (for example a screenshot or an output file).""", Protocols)
 
     by_id = {r["req_id"]: r["id"] for r in reqs}
     names = {"IQ": "Installation Qualification", "OQ": "Operational Qualification", "PQ": "Performance Qualification"}
@@ -271,15 +277,18 @@ TASK: Write the IQ, OQ and PQ test protocols as automated pytest tests.
             lines = [f"# {names[kind]} Protocol: {s['name']}", "",
                      "This protocol must be approved before execution. Results are recorded only by the automated runner."]
             for t in tests:
-                lines += ["", f"## {t.test_id}: {t.title}", f"**Verifies:** {', '.join(t.requirement_ids)}", "",
-                          "**Procedure**", t.steps, "", "**Acceptance criteria**", t.expected, "",
-                          "```python", t.code.strip(), "```"]
+                manual = t.automation == "manual" or not t.code.strip()
+                lines += ["", f"## {t.test_id}: {t.title}", f"**Verifies:** {', '.join(t.requirement_ids)}",
+                          f"**Execution:** {'manual, by a human tester' if manual else 'automated (pytest)'}", "",
+                          "**Procedure**", t.steps, "", "**Acceptance criteria**", t.expected,
+                          *([] if manual else ["", "```python", t.code.strip(), "```"])]
             art = db.create_artifact(conn, system_id, kind, f"{names[kind]} Protocol: {s['name']}", "\n".join(lines), actor)
             for t in tests:
                 tc = conn.execute(
-                    """insert into test_cases (system_id, artifact_id, test_id, title, steps, expected, code)
-                       values (%s, %s, %s, %s, %s, %s, %s) returning id""",
-                    (system_id, art["id"], t.test_id, t.title, t.steps, t.expected, t.code)).fetchone()
+                    """insert into test_cases (system_id, artifact_id, test_id, title, steps, expected, automation, code)
+                       values (%s, %s, %s, %s, %s, %s, %s, %s) returning id""",
+                    (system_id, art["id"], t.test_id, t.title, t.steps, t.expected,
+                     "manual" if t.automation == "manual" or not t.code.strip() else "pytest", t.code)).fetchone()
                 for rid in t.requirement_ids:
                     if rid in by_id:
                         conn.execute("insert into test_requirements values (%s, %s) on conflict do nothing",
@@ -332,3 +341,78 @@ TASK: Investigate this deviation.
         return conn.execute("update deviations set investigation = %s, proposed_fix = %s where id = %s returning *",
                             (f"{fix.investigation}\n\nRoot cause: {fix.root_cause_location}", proposal,
                              deviation_id)).fetchone()
+
+
+# --------------------------------------------------------------------------- supplier assessment
+SUPPLIER_QUESTIONS = [
+    "Does the supplier operate a documented quality management system, and is it certified or audited?",
+    "Is the software developed under a defined development lifecycle with documented requirements and design?",
+    "What testing does the supplier perform (unit, integration, system, regression), and is it documented with results?",
+    "How are defects tracked, prioritised and resolved, and are known defects published?",
+    "How are changes and releases controlled, versioned and communicated to customers (release notes)?",
+    "Does the supplier perform code review and maintain source control with traceable history?",
+    "How are security vulnerabilities handled, and how quickly are fixes released?",
+    "Does the product provide audit trails, access controls and electronic signatures relevant to 21 CFR Part 11 / Annex 11?",
+    "What documentation is supplied to the customer (user, administrator, installation, validation support)?",
+    "What support, maintenance and end-of-life commitments does the supplier make?",
+    "How does the supplier manage its own suppliers, open-source components and their licences?",
+    "Does the supplier provide backup, restore, business continuity or data migration support?",
+]
+
+
+class SupplierAnswer(BaseModel):
+    question_no: int
+    answer: str
+    evidence: str
+    support: Literal["documented", "partly documented", "not found"]
+
+
+class SupplierAssessment(BaseModel):
+    answers: list[SupplierAnswer]
+    reliance: Literal["full", "partial", "none"]
+    reliance_rationale: str
+    follow_up_questions: list[str]
+
+
+def run_supplier_assessment(system_id, vendor: str, documents: str = "") -> dict:
+    """Draft the supplier questionnaire from the vendor's own documents, with a reliance recommendation.
+    Uses pasted vendor documents when given, otherwise the documentation inside the target repository."""
+    actor = "agent:supplier"
+    with db.read() as conn:
+        s = _system(conn, system_id)
+    material = (f"VENDOR DOCUMENTS (pasted):\n{documents}" if documents.strip()
+                else f"VENDOR MATERIAL (target repository, line-numbered):\n{ingest.bundle(s['repo_path'])}")
+    questions = "\n".join(f"{i}. {q}" for i, q in enumerate(SUPPLIER_QUESTIONS, 1))
+    sa, meta = llm.generate(actor, GROUND_RULES, f"""SYSTEM: {s['name']}    SUPPLIER: {vendor}
+GxP IMPACT: {s['gxp_impact']}   GAMP CATEGORY: {s['gamp_category']}
+
+INTENDED USE:
+{s['intended_use']}
+
+{material}
+
+SUPPLIER QUESTIONNAIRE:
+{questions}
+
+TASK: Answer every question from the vendor material only (use the question number).
+- `evidence`: the path:line citation, or a short exact quote with its document name, that supports the
+  answer. If nothing supports it, answer 'Not stated in the supplied material', evidence 'none found',
+  support 'not found'. Never assume a practice exists because it is common.
+- `reliance`: how far the customer can rely on the supplier's own testing instead of repeating it:
+  'full' only if testing, change control and defect handling are all documented with evidence;
+  'partial' if some are; 'none' otherwise. Scale to the GxP impact and intended use.
+- `follow_up_questions`: what to ask the supplier to close each 'not found' that matters.""", SupplierAssessment)
+
+    by_no = {a.question_no: a for a in sa.answers}
+    lines = [f"# Supplier Assessment: {vendor} ({s['name']})", "",
+             "Drafted from the supplier's own material. Every answer cites its evidence; unanswered questions are marked.",
+             "", "| # | Question | Answer | Evidence | Support |", "|---|---|---|---|---|"]
+    for i, q in enumerate(SUPPLIER_QUESTIONS, 1):
+        a = by_no.get(i)
+        lines.append(f"| {i} | {q} | {a.answer if a else 'Not answered'} | {a.evidence if a else 'none found'} | "
+                     f"{a.support if a else 'not found'} |")
+    lines += ["", "## Reliance recommendation (draft, for QA decision)", f"**{sa.reliance.capitalize()} reliance.** {sa.reliance_rationale}",
+              "", "## Follow-up questions for the supplier", *([f"- {q}" for q in sa.follow_up_questions] or ["- None"])]
+    with db.tx(actor, db.AGENT) as conn:
+        db.audit(conn, "llm_call", "system", system_id, meta)
+        return db.create_artifact(conn, system_id, "SUPPLIER", f"Supplier Assessment: {vendor}", "\n".join(lines), actor)

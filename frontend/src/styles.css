@@ -1589,3 +1589,42 @@ tbody tr:hover {
 .signin-card select {
   width:100%;
 }
+
+/* Release checklist and inspection answers */
+.checklist {
+  display:grid;
+  gap:8px;
+  margin:14px 0;
+}
+.check-row {
+  display:flex;
+  gap:12px;
+  align-items:flex-start;
+  padding:11px 14px;
+  border:1px solid var(--line);
+  border-radius:8px;
+}
+.check-row p {
+  margin:4px 0 0;
+}
+.check-row.ok {
+  background:var(--ok-bg);
+  border-color:#cfe8dc;
+}
+.check-row.ok .check-mark {
+  color:var(--ok);
+}
+.check-row.bad {
+  background:var(--bad-bg);
+  border-color:#f3cfd0;
+}
+.check-row.bad .check-mark {
+  color:var(--bad);
+}
+.qa {
+  padding:12px 0;
+  border-top:1px solid var(--line);
+}
+.qa h3 {
+  margin:0 0 6px;
+}

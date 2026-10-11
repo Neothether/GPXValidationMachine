@@ -5,21 +5,63 @@ URS/FS/DS, risk assessment and IQ/OQ/PQ protocols, executes the tests with hashe
 traceability matrix, reviews the package, maps Part 11 / Annex 11 controls, and assesses changes so the
 system stays validated. Qualified people review and e-sign; the tool never approves, and never fabricates.
 
+## What it covers
+
+| Problem in the brief | What the tool produces |
+|---|---|
+| 1. Planning and specifications | Validation Plan following the pasted SOP; URS, FS, DS with IDs and `file:line` source links (checked to resolve); GxP impact and GAMP category with rationale |
+| 2. Risk | Function-level severity, probability, detectability with rationale; rating by the GAMP 5 two-step method; test depth tied to the rating |
+| 3. Traceability | Live matrix requirement / risk / test / result / approval, in both directions; gap report; frozen package snapshot per software version |
+| 4. Testing and evidence | IQ/OQ/PQ protocols; automated execution with pytest; guided manual steps signed by a tester with attachments; per-step evidence (result, hashed log or attachment, identity, time, software fingerprint, environment); deviations with investigation, fix proposal, retest or QA acceptance; summary report built from records |
+| 5. Review and audit | Package review findings with QA disposition; scored against a flawed package (`fixtures/flawed_package`); supplier questionnaire answered from vendor documents with a reliance recommendation; Part 11 / Annex 11 control map; audit trail import, anomaly report and CAPA |
+| 6. Staying validated | Inventory with live status (a released system whose files change is flagged); change impact with regression scope and rationale; change records for e-signature; periodic review with findings, owners and due dates; inspection answers citing records |
+
 ## How the guarantees are enforced
 
-They live in the database (`backend/sql/002_enforcement.sql`), not in prompts or UI logic:
+They live in the database (`backend/sql/002_enforcement.sql`, `005_lifecycle.sql`), not in prompts or UI logic:
 
 | Behaviour | Mechanism |
 |---|---|
 | Humans approve | Signatures can only be inserted for human identities, after password re-entry, bound to the content hash |
 | Segregation of duties | Trigger rejects a signature from the artifact's author |
 | Pre-approval before execution | Trigger rejects an execution unless the protocol has an earlier approval signature |
-| Never fabricates | Agents run as `vm_agent`, which has no INSERT on results, evidence or signatures. Only `vm_runner` (no LLM) does |
-| Evidence cannot be silently altered | Results, evidence and signatures are append-only; evidence files are SHA-256 hashed at capture |
+| Never fabricates | Agents run as `vm_agent`, which has no INSERT on results, evidence or signatures. Automated results come only from `vm_runner` (no LLM); manual results only from a human tester through `vm_tester` |
+| Evidence cannot be silently altered | Results, evidence, signatures, releases and snapshots are append-only; evidence files are SHA-256 hashed at capture |
 | Audit trail | Hash-chained hypertable, append-only, verifiable with `select * from vm_verify_audit_chain()` |
-| Never "validated" without QA | Trigger requires an approved Validation Summary Report and no open deviations |
+| Release is tied to the software version | `vm_release_blockers()` lists every reason a system may not be released for the software as it is on disk; the release trigger refuses while the list is non-empty and records the released fingerprint |
+| An old report never releases a new version | A summary report older than the latest result, change or deviation closure is a blocker, and it cannot be approved while other blockers remain |
+| Only QA or the system owner releases | Checked in the release trigger |
+| Deviations close honestly | Only by a passing retest, or by QA acceptance with a written justification |
 
-`backend/tests/test_enforcement.py` proves each one fails closed.
+`backend/tests/test_enforcement.py` proves each rule fails closed. `backend/tests/test_change_cycle.py` runs
+a whole lifecycle through the API against the real database and runner, with only the model replaced by
+fixed drafts: defect found, fixed, retested, released; software changed, release refused; impact assessed,
+regression run, approvals renewed, released again. `backend/tests/test_access.py` checks every route
+refuses an anonymous caller.
+
+## Command line and CI
+
+```bash
+python vm.py validate --repo . --name "My app" --intended-use intended_use.txt --sop sop.md
+python vm.py execute  --system <id>
+python vm.py change   --system <id> --diff change.diff --description "What changed" --regress
+python vm.py check    --system <id>     # exit 0 only if this software version is released as validated
+python vm.py package  --system <id> --out package.html
+```
+
+The harness drafts, executes and assesses; it cannot sign or release. `ci/validation-gate.example.yml` is a
+pull-request workflow built on it, and `skill/SKILL.md` lets a coding agent drive the same commands.
+
+## Known limits
+
+- Automated execution is pytest only: Python-reachable behaviour (calculations, APIs, data and configuration
+  files, environment). Anything else becomes a manual step for a tester. There is no browser automation.
+- The validation package is HTML that prints to PDF from the browser; it is not generated as a PDF file.
+- The Validation Plan follows the SOP text supplied; a company's own document templates are not applied.
+- Regulation citations come from a fixed list of 19 Part 11 / Annex 11 controls; regulation text is not retrieved.
+- The database trusts the software fingerprint reported by the application; it cannot hash files itself.
+- Generated tests run unsandboxed on the server. Use trusted targets only.
+- Re-running the package review replaces earlier findings and their dispositions.
 
 ## Stack
 

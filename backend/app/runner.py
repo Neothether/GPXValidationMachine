@@ -52,11 +52,12 @@ def execute(artifact_id, retest_of=None, only_test_case_ids: list | None = None)
         wanted = {str(i) for i in only_test_case_ids}
         tests = [t for t in tests if str(t["id"]) in wanted]
 
+    fingerprint = ingest.refresh_fingerprint(art["system_id"], actor)
     with db.tx(actor, db.RUNNER) as conn:
         ex = conn.execute(
             """insert into executions (system_id, artifact_id, runner_id, target_fingerprint, environment, retest_of)
                values (%s, %s, %s, %s, %s, %s) returning *""",
-            (art["system_id"], artifact_id, actor, ingest.fingerprint(art["repo_path"]),
+            (art["system_id"], artifact_id, actor, fingerprint,
              Jsonb(_environment(art["repo_path"])), retest_of)).fetchone()
 
     run_dir = EVIDENCE_DIR / str(ex["id"])
@@ -80,16 +81,67 @@ def execute(artifact_id, retest_of=None, only_test_case_ids: list | None = None)
                 """insert into step_results (execution_id, test_case_id, outcome, actual, evidence_id, recorded_by)
                    values (%s, %s, %s, %s, %s, %s) returning id""",
                 (ex["id"], t["id"], outcome, output[-6000:], ev["id"], actor)).fetchone()
-            if outcome != "pass":
-                dev = conn.execute(
-                    """insert into deviations (system_id, step_result_id, test_case_id, description)
-                       values (%s, %s, %s, %s) returning id""",
-                    (art["system_id"], sr["id"], t["id"],
-                     f"{t['test_id']} ({t['title']}) did not meet its acceptance criteria: outcome '{outcome}'.")).fetchone()
-                summary["deviations"].append(str(dev["id"]))
+            dev = _raise_deviation(conn, art["system_id"], sr["id"], t, outcome)
+            if dev:
+                summary["deviations"].append(dev)
     with db.tx(actor, db.RUNNER) as conn:
         conn.execute("update executions set finished_at = clock_timestamp() where id = %s", (ex["id"],))
     return summary
+
+
+def _raise_deviation(conn, system_id, step_result_id, test: dict, outcome: str) -> str | None:
+    """Open a deviation for a step that did not pass, unless one is already open or accepted for that test."""
+    if outcome == "pass":
+        return None
+    known = conn.execute("select status from deviations where test_case_id = %s order by opened_at desc limit 1",
+                         (test["id"],)).fetchone()
+    if known and known["status"] in ("open", "accepted"):
+        return None
+    dev = conn.execute(
+        """insert into deviations (system_id, step_result_id, test_case_id, description)
+           values (%s, %s, %s, %s) returning id""",
+        (system_id, step_result_id, test["id"],
+         f"{test['test_id']} ({test['title']}) did not meet its acceptance criteria: outcome '{outcome}'.")).fetchone()
+    return str(dev["id"])
+
+
+def record_manual(test_case_id, tester: dict, outcome: str, actual: str,
+                  attachment_name: str | None = None, attachment: bytes | None = None) -> dict:
+    """A human tester records the result of a manual step, with an optional attachment (e.g. a screenshot).
+    Runs as vm_tester: the database accepts it only for manual tests and only from a human tester."""
+    actor = tester["id"]
+    with db.read() as conn:
+        t = conn.execute("select tc.*, s.repo_path from test_cases tc join systems s on s.id = tc.system_id "
+                         "where tc.id = %s", (test_case_id,)).fetchone()
+    fingerprint = ingest.refresh_fingerprint(t["system_id"], actor)
+    with db.tx(actor, db.TESTER) as conn:
+        ex = conn.execute(
+            """insert into executions (system_id, artifact_id, runner_id, target_fingerprint, environment)
+               values (%s, %s, %s, %s, %s) returning id""",
+            (t["system_id"], t["artifact_id"], actor, fingerprint or "unknown",
+             Jsonb({"manual": True, "host": platform.node(), "platform": platform.platform()}))).fetchone()
+        run_dir = EVIDENCE_DIR / str(ex["id"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        stem = t["test_id"].lower().replace("-", "_")
+        if attachment:
+            suffix = Path(attachment_name or "attachment").suffix[:10]
+            evidence_file, kind = run_dir / f"{stem}_attachment{suffix}", "attachment"
+            evidence_file.write_bytes(attachment)
+        else:
+            evidence_file, kind = run_dir / f"{stem}_observation.txt", "tester_observation"
+            evidence_file.write_text(f"Test {t['test_id']}: {t['title']}\nTester: {tester['display_name']} ({actor})\n"
+                                     f"Outcome: {outcome}\n\nObserved result:\n{actual}\n", encoding="utf-8")
+        ev = conn.execute(
+            """insert into evidence (execution_id, test_case_id, kind, path, sha256, captured_by)
+               values (%s, %s, %s, %s, %s, %s) returning id""",
+            (ex["id"], t["id"], kind, str(evidence_file), db.sha256(evidence_file.read_bytes()), actor)).fetchone()
+        sr = conn.execute(
+            """insert into step_results (execution_id, test_case_id, outcome, actual, evidence_id, recorded_by)
+               values (%s, %s, %s, %s, %s, %s) returning id""",
+            (ex["id"], t["id"], outcome, actual, ev["id"], actor)).fetchone()
+        deviation = _raise_deviation(conn, t["system_id"], sr["id"], t, outcome)
+        conn.execute("update executions set finished_at = clock_timestamp() where id = %s", (ex["id"],))
+    return {"execution_id": str(ex["id"]), "outcome": outcome, "deviation": deviation}
 
 
 def verify_evidence(execution_id) -> list[dict]:
