@@ -15,8 +15,9 @@ const HELICES: Helix[] = [
 ];
 const SAMPLES = 240;
 const RUNG_EVERY = 6;
-const PURPLE = [139, 92, 246];
-const PINK = [236, 72, 153];
+// Deep violet to light violet along each strand: the only brand colour in an otherwise black and off-white app.
+const PURPLE = [109, 40, 217];
+const PINK = [192, 132, 252];
 const TAU = Math.PI * 2;
 
 const colour = (t: number, alpha: number) =>

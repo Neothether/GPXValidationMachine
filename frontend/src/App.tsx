@@ -69,7 +69,8 @@ const tone = (v?: string | null) =>
     : ["draft", "partial", "medium", "minor", "change_pending", "in_validation"].includes(v) ? "warn" : "";
 // Older evidence logs were captured with terminal colour codes; show them as plain text.
 const plain = (log: string) => log.replace(/\x1b\[[0-9;]*m/g, "");
-const Chip = ({ v }: { v?: string | null }) => (v ? <span className={`chip ${tone(v)}`}><span className="status-dot"/>{v.replace(/_/g, " ")}</span> : null);
+const SYMBOL: Record<string, string> = { ok: "\u2713", bad: "\u2715", warn: "\u25D0", "": "\u25CB" };
+const Chip = ({ v }: { v?: string | null }) => (v ? <span className={`chip ${tone(v)}`}><span className="status-symbol" aria-hidden="true">{SYMBOL[tone(v)]}</span>{v.replace(/_/g, " ")}</span> : null);
 function Table({ cols, rows, empty = "Nothing recorded yet." }: { cols: string[]; rows: ReactNode[][]; empty?: string }) {
   if (!rows.length) return <div className="empty-state"><Icon name="doc" size={28}/><p>{empty}</p></div>;
   return <div className="tablewrap"><table><thead><tr>{cols.map((c, i) => <th key={i} scope="col">{c}</th>)}</tr></thead><tbody>{rows.map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j}>{c}</td>)}</tr>)}</tbody></table></div>;
